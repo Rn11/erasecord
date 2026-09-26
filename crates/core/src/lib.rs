@@ -23,4 +23,7 @@ pub use filter::{Filter, Has};
 pub use job::{Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
 pub use models::{Message, User};
 pub use snowflake::Snowflake;
-pub use targets::{list_channels, list_targets, GuildChannel, Target, TargetKind};
+pub use targets::{
+    friends_without_dm, list_channels, list_targets, open_dm, Friend, GuildChannel, Target,
+    TargetKind,
+};

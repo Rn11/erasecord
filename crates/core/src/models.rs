@@ -64,6 +64,21 @@ pub struct Channel {
     pub position: Option<i64>,
 }
 
+/// An entry of the friend list (or a block, or a pending request).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Relationship {
+    /// The other user's ID.
+    pub id: Snowflake,
+    /// 1 = friend, 2 = blocked, 3/4 = incoming/outgoing request.
+    #[serde(rename = "type")]
+    pub kind: u8,
+    pub user: User,
+}
+
+impl Relationship {
+    pub const FRIEND: u8 = 1;
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub id: Snowflake,

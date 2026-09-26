@@ -5,6 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CommandError,
   Filter,
+  Friend,
   GuildChannel,
   JobEvent,
   JobOptions,
@@ -20,6 +21,8 @@ export const api = {
   logout: () => invoke<void>("logout"),
   listTargets: () => invoke<Target[]>("list_targets"),
   listChannels: (guildId: string) => invoke<GuildChannel[]>("list_channels", { guildId }),
+  listFriends: () => invoke<Friend[]>("list_friends"),
+  openDm: (userId: string) => invoke<Target>("open_dm", { userId }),
   preview: (targets: Target[], filter: Filter, options: JobOptions) =>
     invoke<PreviewEntry[]>("preview", { targets, filter, options }),
   startJob: (targets: Target[], filter: Filter, options: JobOptions) =>

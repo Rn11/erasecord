@@ -4,9 +4,11 @@ use std::sync::{Arc, Mutex};
 
 use common::*;
 use purgecord_core::search::{Scope, SearchQuery};
-use purgecord_core::{list_targets, Client, Error, Has, Notice, Snowflake, TargetKind};
+use purgecord_core::{
+    friends_without_dm, list_targets, open_dm, Client, Error, Has, Notice, Snowflake, TargetKind,
+};
 use serde_json::json;
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn collect_notices(client: &Client) -> Arc<Mutex<Vec<Notice>>> {
@@ -237,5 +239,54 @@ async fn lists_servers_then_dms() {
     assert_eq!(
         targets[3].icon_url.as_deref(),
         Some("https://cdn.discordapp.com/avatars/7/av.png?size=64")
+    );
+}
+
+#[tokio::test]
+async fn finds_friends_without_an_open_dm_and_opens_one() {
+    let server = MockServer::start().await;
+    let user = |id: &str, name: &str| json!({ "id": id, "username": name, "avatar": null });
+    Mock::given(method("GET"))
+        .and(path("/api/v9/users/@me/relationships"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": "7", "type": 1, "user": user("7", "bob") },
+            { "id": "8", "type": 1, "user": user("8", "zoe") },
+            { "id": "5", "type": 1, "user": user("5", "Ann") },
+            { "id": "9", "type": 2, "user": user("9", "blocked") },
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v9/users/@me/channels"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "id": "30", "type": 1, "recipients": [user("7", "bob")] },
+            // Being in a group DM with someone does not count as an open DM.
+            { "id": "31", "type": 3, "recipients": [user("8", "zoe"), user("5", "Ann")] },
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v9/users/@me/channels"))
+        .and(body_json(json!({ "recipient_id": "8" })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "id": "40", "type": 1, "recipients": [user("8", "zoe")] })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let client = client_for(&server);
+
+    let friends = friends_without_dm(&client).await.unwrap();
+    let names: Vec<(u64, &str)> = friends
+        .iter()
+        .map(|f| (f.user_id.0, f.name.as_str()))
+        .collect();
+    assert_eq!(names, [(5, "Ann"), (8, "zoe")]);
+
+    let target = open_dm(&client, Snowflake(8)).await.unwrap();
+    assert_eq!(
+        (target.kind, target.id.0, target.name.as_str()),
+        (TargetKind::Dm, 40, "zoe")
     );
 }

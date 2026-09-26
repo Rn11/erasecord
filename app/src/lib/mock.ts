@@ -4,7 +4,7 @@
 
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Filter, GuildChannel, JobEvent, PreviewEntry, Stats, Target, User } from "./types";
+import type { Filter, Friend, GuildChannel, JobEvent, PreviewEntry, Stats, Target, User } from "./types";
 
 const me: User = { id: "1000", username: "demo", global_name: "Demo User", avatar: null };
 
@@ -21,6 +21,12 @@ const targets: Target[] = [
   ["group_dm", "4003", "Alice, Bob, Charlie"],
   ["dm", "4004", "Dana"],
 ].map(([kind, id, name]) => ({ kind, id, name, icon_url: null, channels: [] }) as Target);
+
+const friends: Friend[] = [
+  { user_id: "5001", name: "Erin", icon_url: null },
+  { user_id: "5002", name: "Frank", icon_url: null },
+  { user_id: "5003", name: "Grace", icon_url: null },
+];
 
 function channelsOf(guildId: string): GuildChannel[] {
   const make = (n: number, name: string, category: string | null, kind = 0): GuildChannel => ({
@@ -140,6 +146,17 @@ export function installMockBackend() {
         case "list_targets":
           await sleep(300);
           return targets;
+        case "list_friends":
+          await sleep(400);
+          return friends.filter((f) => !targets.some((t) => t.id === `6${f.user_id}`));
+        case "open_dm": {
+          await sleep(300);
+          const friend = friends.find((f) => f.user_id === args.userId);
+          if (!friend) throw { kind: "other", message: "Discord answered 400: Unknown User" };
+          const target: Target = { kind: "dm", id: `6${friend.user_id}`, name: friend.name, icon_url: null, channels: [] };
+          if (!targets.some((t) => t.id === target.id)) targets.push(target);
+          return target;
+        }
         case "list_channels":
           await sleep(300);
           if (args.guildId === "3005") throw { kind: "other", message: "Discord answered 403: Missing Access" };

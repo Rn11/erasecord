@@ -21,6 +21,13 @@ export interface Target {
   channels: Snowflake[];
 }
 
+/** A friend whose DM is closed. */
+export interface Friend {
+  user_id: Snowflake;
+  name: string;
+  icon_url: string | null;
+}
+
 export interface GuildChannel {
   id: Snowflake;
   name: string;

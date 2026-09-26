@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::models::{Channel, Guild, SearchResponse, User};
+use crate::models::{Channel, Guild, Relationship, SearchResponse, User};
 use crate::ratelimit::{self, RateLimiter};
 use crate::search::{Scope, SearchQuery};
 use crate::snowflake::Snowflake;
@@ -157,6 +157,21 @@ impl Client {
     /// Open DMs and group DMs.
     pub async fn private_channels(&self) -> Result<Vec<Channel>> {
         self.get("/users/@me/channels", &[]).await
+    }
+
+    /// Friends, blocked users and friend requests.
+    pub async fn relationships(&self) -> Result<Vec<Relationship>> {
+        self.get("/users/@me/relationships", &[]).await
+    }
+
+    /// Opens the DM with a user, or returns it if it is open already. Only
+    /// the user's own DM list changes; the other person is not notified.
+    pub async fn open_dm(&self, user_id: Snowflake) -> Result<Channel> {
+        let body = serde_json::json!({ "recipient_id": user_id.to_string() });
+        let response = self
+            .send(Method::POST, "/users/@me/channels", &[], Some(&body))
+            .await?;
+        Ok(serde_json::from_slice(&response.bytes().await?)?)
     }
 
     /// The channels of a server that the user can see.

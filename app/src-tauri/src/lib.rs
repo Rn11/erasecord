@@ -12,6 +12,8 @@ pub fn run() {
             commands::logout,
             commands::list_targets,
             commands::list_channels,
+            commands::list_friends,
+            commands::open_dm,
             commands::preview,
             commands::start_job,
             commands::pause_job,

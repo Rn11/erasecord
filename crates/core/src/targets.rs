@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::client::Client;
-use crate::error::Result;
-use crate::models::{channel_type, Channel, Guild, User};
+use crate::error::{Error, Result};
+use crate::models::{channel_type, Channel, Guild, Relationship, User};
 use crate::search::Scope;
 use crate::snowflake::Snowflake;
 
@@ -71,10 +71,7 @@ impl Target {
                 .join(", "),
         };
         let icon_url = match kind {
-            TargetKind::Dm => channel.recipients.first().and_then(|user| {
-                let hash = user.avatar.as_ref()?;
-                Some(format!("{CDN}/avatars/{}/{hash}.png?size=64", user.id))
-            }),
+            TargetKind::Dm => channel.recipients.first().and_then(avatar_url),
             _ => channel
                 .icon
                 .map(|hash| format!("{CDN}/channel-icons/{}/{hash}.png?size=64", channel.id)),
@@ -92,6 +89,54 @@ impl Target {
     pub fn covers_channel(&self, channel_id: Snowflake) -> bool {
         self.channels.is_empty() || self.channels.contains(&channel_id)
     }
+}
+
+/// A friend whose DM is closed, so it does not show up in the DM list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Friend {
+    pub user_id: Snowflake,
+    pub name: String,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+}
+
+fn avatar_url(user: &User) -> Option<String> {
+    let hash = user.avatar.as_ref()?;
+    Some(format!("{CDN}/avatars/{}/{hash}.png?size=64", user.id))
+}
+
+/// Friends without an open DM, sorted by name. Their conversations can be
+/// reached with [`open_dm`].
+pub async fn friends_without_dm(client: &Client) -> Result<Vec<Friend>> {
+    let relationships = client.relationships().await?;
+    let open: Vec<Snowflake> = client
+        .private_channels()
+        .await?
+        .into_iter()
+        .filter(|c| c.kind == channel_type::DM)
+        .flat_map(|c| c.recipients.into_iter().map(|u| u.id))
+        .collect();
+    let mut friends: Vec<Friend> = relationships
+        .into_iter()
+        .filter(|r| r.kind == Relationship::FRIEND && !open.contains(&r.id))
+        .map(|r| Friend {
+            user_id: r.id,
+            name: r.user.display_name().to_owned(),
+            icon_url: avatar_url(&r.user),
+        })
+        .collect();
+    friends.sort_by_key(|f| f.name.to_lowercase());
+    Ok(friends)
+}
+
+/// Opens the DM with a user so it can be cleaned up like any open DM.
+pub async fn open_dm(client: &Client, user_id: Snowflake) -> Result<Target> {
+    let channel = client.open_dm(user_id).await?;
+    Target::from_channel(channel).ok_or_else(|| Error::Api {
+        status: 200,
+        code: None,
+        message: "Discord did not return a DM channel".into(),
+    })
 }
 
 /// A channel of a server that can hold messages.

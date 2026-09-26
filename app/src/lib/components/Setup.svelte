@@ -10,7 +10,7 @@
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
-  import type { GuildChannel, Has, JobOptions, Target } from "$lib/types";
+  import type { Friend, GuildChannel, Has, JobOptions, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
   let {
@@ -21,6 +21,12 @@
     channelPicks,
     channelLists,
     onLoadChannels,
+    friends,
+    friendsLoading,
+    friendsError,
+    opening,
+    onLoadFriends,
+    onOpenFriend,
     range = $bindable(),
     content = $bindable(),
     skipPinned = $bindable(),
@@ -35,6 +41,12 @@
     channelPicks: SvelteMap<string, string[]>;
     channelLists: SvelteMap<string, { loading: boolean; error: string | null; channels: GuildChannel[] }>;
     onLoadChannels: (guildId: string) => void;
+    friends: Friend[] | null;
+    friendsLoading: boolean;
+    friendsError: string | null;
+    opening: SvelteSet<string>;
+    onLoadFriends: () => void;
+    onOpenFriend: (friend: Friend) => void;
     range: RangeForm;
     content: ContentForm;
     skipPinned: boolean;
@@ -50,6 +62,9 @@
   const dms = $derived(targets.filter((t) => t.kind !== "guild"));
   const visible = $derived(
     (tab === "servers" ? servers : dms).filter((t) => t.name.toLowerCase().includes(query.trim().toLowerCase())),
+  );
+  const visibleFriends = $derived(
+    (friends ?? []).filter((f) => f.name.toLowerCase().includes(query.trim().toLowerCase())),
   );
   const allVisibleSelected = $derived(visible.length > 0 && visible.every((t) => selected.has(t.id)));
   const selectedServers = $derived(servers.filter((t) => selected.has(t.id)).length);
@@ -201,7 +216,37 @@
       {/if}
     </div>
     {#if tab === "dms"}
-      <p class="hint small muted">Only open DMs are listed. Closed conversations can be reopened in Discord first.</p>
+      <div class="closed">
+        {#if friends === null}
+          <p class="small muted">Only open DMs are listed.</p>
+          <button class="btn small" onclick={onLoadFriends} disabled={friendsLoading}>
+            {#if friendsLoading}<span class="spinner"></span>{/if} Find friends without an open DM
+          </button>
+        {:else}
+          <div class="closed-head small">
+            <strong>Friends without an open DM</strong>
+            <span class="muted">Ticking one reopens the conversation in your DM list; they are not notified.</span>
+          </div>
+          {#if visibleFriends.length === 0}
+            <p class="small muted">{friends.length ? "Nothing matches your filter." : "Every friend's DM is open already."}</p>
+          {:else}
+            <div class="friends">
+              {#each visibleFriends as friend (friend.user_id)}
+                <label class="row">
+                  {#if opening.has(friend.user_id)}
+                    <span class="spinner muted"></span>
+                  {:else}
+                    <input type="checkbox" checked={false} onchange={() => onOpenFriend(friend)} />
+                  {/if}
+                  <Avatar name={friend.name} url={friend.icon_url} size={24} />
+                  <span class="name">{friend.name}</span>
+                </label>
+              {/each}
+            </div>
+          {/if}
+        {/if}
+        {#if friendsError}<p class="small problem">{friendsError}</p>{/if}
+      </div>
     {/if}
   </section>
 
@@ -547,9 +592,23 @@
     flex-direction: row;
   }
 
-  .hint {
-    padding: 8px 12px;
+  .closed {
+    padding: 8px 12px 10px;
     border-top: 1px solid var(--border);
+    display: grid;
+    gap: 8px;
+    justify-items: start;
+  }
+
+  .closed-head {
+    display: grid;
+    gap: 2px;
+  }
+
+  .friends {
+    width: 100%;
+    max-height: 30vh;
+    overflow-y: auto;
   }
 
   .options {

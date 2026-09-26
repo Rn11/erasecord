@@ -14,7 +14,7 @@
     type RangeForm,
   } from "$lib/format";
   import { applyEvent, newRun, type RunState } from "$lib/run";
-  import type { Filter, GuildChannel, JobOptions, PreviewEntry, Target, User } from "$lib/types";
+  import type { Filter, Friend, GuildChannel, JobOptions, PreviewEntry, Target, User } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
   import Login from "$lib/components/Login.svelte";
   import Preview from "$lib/components/Preview.svelte";
@@ -35,6 +35,11 @@
   const channelPicks = new SvelteMap<string, string[]>();
   /** Server ID → its channels, once loaded. */
   const channelLists = new SvelteMap<string, { loading: boolean; error: string | null; channels: GuildChannel[] }>();
+  /** Friends without an open DM; null until asked for. */
+  let friends = $state<Friend[] | null>(null);
+  let friendsLoading = $state(false);
+  let friendsError = $state<string | null>(null);
+  const opening = new SvelteSet<string>();
   let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
   let content = $state<ContentForm>(emptyContent());
   let skipPinned = $state(true);
@@ -109,6 +114,8 @@
       for (const id of [...selected]) if (!known.has(id)) selected.delete(id);
       for (const id of [...channelPicks.keys()]) if (!known.has(id)) channelPicks.delete(id);
       channelLists.clear();
+      friends = null;
+      friendsError = null;
     } catch (err) {
       targetsError = fail(err);
     } finally {
@@ -128,6 +135,39 @@
     }
   }
 
+  async function loadFriends() {
+    friendsLoading = true;
+    friendsError = null;
+    try {
+      friends = await api.listFriends();
+    } catch (err) {
+      friendsError = fail(err);
+    } finally {
+      friendsLoading = false;
+    }
+  }
+
+  /** Opens a friend's DM and selects it; it then shows up like any open DM. */
+  async function openFriend(friend: Friend) {
+    if (opening.has(friend.user_id)) return;
+    opening.add(friend.user_id);
+    friendsError = null;
+    try {
+      const target = await api.openDm(friend.user_id);
+      if (!targets.some((t) => t.id === target.id)) {
+        const servers = targets.filter((t) => t.kind === "guild");
+        targets = [...servers, target, ...targets.filter((t) => t.kind !== "guild")];
+      }
+      selected.add(target.id);
+      friends = friends?.filter((f) => f.user_id !== friend.user_id) ?? null;
+    } catch (err) {
+      const message = fail(err);
+      if (message) friendsError = `Could not open the DM with ${friend.name}: ${message}`;
+    } finally {
+      opening.delete(friend.user_id);
+    }
+  }
+
   async function logout() {
     await api.logout();
     user = null;
@@ -135,6 +175,7 @@
     selected.clear();
     channelPicks.clear();
     channelLists.clear();
+    friends = null;
     run = null;
     notice = null;
     screen = "login";
@@ -240,6 +281,12 @@
         {channelPicks}
         {channelLists}
         onLoadChannels={loadChannels}
+        {friends}
+        {friendsLoading}
+        {friendsError}
+        {opening}
+        onLoadFriends={loadFriends}
+        onOpenFriend={openFriend}
         bind:range
         bind:content
         bind:skipPinned

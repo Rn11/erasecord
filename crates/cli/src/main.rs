@@ -10,7 +10,8 @@ use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use purgecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use purgecord_core::{
-    list_channels, list_targets, Client, ClientConfig, Has, Notice, Snowflake, Target, TargetKind,
+    friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, Has, Notice,
+    Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -35,6 +36,9 @@ enum Command {
         /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Also list friends whose DM is closed, with their user IDs for --dm-with.
+        #[arg(long)]
+        friends: bool,
     },
     /// List the channels of a server with their IDs, for --channel.
     Channels {
@@ -83,6 +87,10 @@ struct Selection {
     /// are separate channels. See `purgecord channels <SERVER_ID>`.
     #[arg(short, long = "channel", value_name = "ID")]
     channels: Vec<Snowflake>,
+    /// The DM with this user, opening it if it is closed (only your own DM list changes).
+    /// Repeat for several. See `purgecord list --friends`.
+    #[arg(long = "dm-with", value_name = "USER_ID")]
+    dm_with: Vec<Snowflake>,
 }
 
 #[derive(Args)]
@@ -178,10 +186,11 @@ impl Command {
         };
         if selection.targets.is_empty()
             && selection.channels.is_empty()
+            && selection.dm_with.is_empty()
             && !selection.all_servers
             && !selection.all_dms
         {
-            bail!("choose what to clean up: --target <ID>, --channel <ID>, --all-servers and/or --all-dms (see `purgecord list`)");
+            bail!("choose what to clean up: --target <ID>, --channel <ID>, --dm-with <USER_ID>, --all-servers and/or --all-dms (see `purgecord list`)");
         }
         build_filter(range, content, false)?;
         if needs_confirmation && !io::stdin().is_terminal() {
@@ -218,12 +227,30 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
-        Command::List { json } => {
+        Command::List { json, friends } => {
             let targets = list_targets(&client).await?;
+            let friends = if friends {
+                Some(friends_without_dm(&client).await?)
+            } else {
+                None
+            };
             if json {
-                println!("{}", serde_json::to_string_pretty(&targets)?);
+                let value = match friends {
+                    Some(friends) => {
+                        serde_json::json!({ "targets": targets, "friends_without_dm": friends })
+                    }
+                    None => serde_json::to_value(&targets)?,
+                };
+                println!("{}", serde_json::to_string_pretty(&value)?);
             } else {
                 print_targets(&targets);
+                if let Some(friends) = friends {
+                    println!();
+                    println!("Friends without an open DM (use --dm-with <USER_ID>):");
+                    for friend in friends {
+                        println!("{:<9} {:<20} {}", "friend", friend.user_id, friend.name);
+                    }
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -370,6 +397,14 @@ async fn select(client: &Client, selection: &Selection) -> Result<Vec<Target>> {
         };
         if !chosen[index].channels.contains(&channel_id) {
             chosen[index].channels.push(channel_id);
+        }
+    }
+    for &user_id in &selection.dm_with {
+        let target = open_dm(client, user_id)
+            .await
+            .with_context(|| format!("could not open the DM with user {user_id}"))?;
+        if !chosen.iter().any(|t| t.id == target.id) {
+            chosen.push(target);
         }
     }
     Ok(chosen)
