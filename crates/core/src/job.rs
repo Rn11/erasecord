@@ -353,7 +353,9 @@ async fn run_from(
 ) -> Summary {
     let compiled = match source {
         Source::Search => filter.compile(),
-        Source::Package(_) => filter.compile_for_package(),
+        Source::Package(package) => package
+            .check_owner(me)
+            .and_then(|()| filter.compile_for_package()),
     };
     let matcher = match compiled {
         Ok(matcher) => matcher,
@@ -567,10 +569,10 @@ impl Job<'_> {
         }
         match self
             .control
-            .guard(self.client.pinned_messages(channel_id))
+            .guard(self.client.pinned_message_ids(channel_id))
             .await?
         {
-            Ok(pins) => Ok(Ok(pins.into_iter().map(|m| m.id).collect())),
+            Ok(pins) => Ok(Ok(pins.into_iter().collect())),
             Err(Error::Unauthorized) => Err(Error::Unauthorized),
             Err(err) => Ok(Err(format!("could not check its pinned messages: {err}"))),
         }

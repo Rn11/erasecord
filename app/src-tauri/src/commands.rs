@@ -288,6 +288,7 @@ pub async fn import_package(
     let package = tauri::async_runtime::spawn_blocking(move || Package::open(&path))
         .await
         .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
+    package.check_owner(session.me.id)?;
     let targets = package.targets();
     let member_of: Vec<Snowflake> = session
         .client

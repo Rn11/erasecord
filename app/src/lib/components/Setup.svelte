@@ -103,6 +103,12 @@
     } else selected.add(id);
   }
 
+  // Lists are dropped on reload or when switching to or from a package;
+  // fetch them again for servers that are still expanded.
+  $effect(() => {
+    for (const id of expanded) if (!channelLists.has(id)) onLoadChannels(id);
+  });
+
   function toggleExpanded(id: string) {
     if (expanded.has(id)) expanded.delete(id);
     else {
@@ -117,7 +123,11 @@
     if (next.length) {
       channelPicks.set(guildId, next);
       selected.add(guildId);
-    } else channelPicks.delete(guildId);
+    } else {
+      // Never widen to the whole server behind the user's back.
+      channelPicks.delete(guildId);
+      selected.delete(guildId);
+    }
   }
 
   /** Channels grouped under their category, keeping Discord's order. */
@@ -137,7 +147,10 @@
     const select = !allVisibleSelected;
     for (const target of visible) {
       if (select) selected.add(target.id);
-      else selected.delete(target.id);
+      else {
+        selected.delete(target.id);
+        channelPicks.delete(target.id);
+      }
     }
   }
 </script>

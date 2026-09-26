@@ -95,6 +95,8 @@ pub struct PackageChannelInfo {
 
 #[derive(Debug, Clone, Default)]
 pub struct Package {
+    /// The account the package belongs to, from `account/user.json`.
+    pub owner: Option<Snowflake>,
     pub channels: Vec<PackageChannel>,
 }
 
@@ -132,12 +134,18 @@ impl Package {
     pub fn from_files(files: impl IntoIterator<Item = (String, Vec<u8>)>) -> Result<Package> {
         let mut index: HashMap<Snowflake, String> = HashMap::new();
         let mut found_index = false;
+        let mut owner = None;
         let mut channels: HashMap<Snowflake, ChannelFiles> = HashMap::new();
         for (name, data) in files {
             let Some(file) = message_file(&name) else {
                 continue;
             };
             match file {
+                MessageFile::Owner => {
+                    let user: Value = serde_json::from_slice(&data)
+                        .map_err(|err| Error::Package(format!("{name}: {err}")))?;
+                    owner = id_of(&user["id"]);
+                }
                 MessageFile::Index => {
                     found_index = true;
                     let names: HashMap<String, Option<String>> = serde_json::from_slice(&data)
@@ -181,7 +189,22 @@ impl Package {
             parsed.push(describe_channel(id, &info, index.get(&id), messages));
         }
         parsed.sort_by_key(|c| std::cmp::Reverse(c.messages.first().map(|m| m.id)));
-        Ok(Package { channels: parsed })
+        Ok(Package {
+            owner,
+            channels: parsed,
+        })
+    }
+
+    /// Refuses a package that belongs to another account: its messages are
+    /// not the logged-in user's, even though moderators could delete them.
+    /// A package without `account/user.json` is accepted.
+    pub fn check_owner(&self, me: Snowflake) -> Result<()> {
+        match self.owner {
+            Some(owner) if owner != me => Err(Error::Package(format!(
+                "it belongs to another account (ID {owner}), not to the one you are logged in with ({me})"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     pub fn message_count(&self) -> u64 {
@@ -279,6 +302,8 @@ struct ChannelFiles {
 }
 
 enum MessageFile {
+    /// `account/user.json`, which names the package's owner.
+    Owner,
     Index,
     Channel(Snowflake),
     Csv(Snowflake),
@@ -289,6 +314,11 @@ enum MessageFile {
 /// any case and below any number of outer folders.
 fn message_file(path: &str) -> Option<MessageFile> {
     let parts: Vec<&str> = path.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+    if let [.., folder, file] = parts.as_slice() {
+        if folder.eq_ignore_ascii_case("account") && file.eq_ignore_ascii_case("user.json") {
+            return Some(MessageFile::Owner);
+        }
+    }
     let root = parts
         .iter()
         .rposition(|p| p.eq_ignore_ascii_case("messages"))?;
@@ -601,6 +631,28 @@ mod tests {
         );
         let ids: Vec<u64> = channel.messages.iter().map(|m| m.id.0).collect();
         assert_eq!(ids, [1234567890123456789, 12]);
+    }
+
+    #[test]
+    fn knows_its_owner() {
+        let mut files = old_layout();
+        files.push(file(
+            "package/Account/user.json",
+            r#"{"id": "42", "username": "me"}"#,
+        ));
+        let package = Package::from_files(files).unwrap();
+        assert_eq!(package.owner, Some(Snowflake(42)));
+        assert!(package.check_owner(Snowflake(42)).is_ok());
+        assert!(package
+            .check_owner(Snowflake(7))
+            .unwrap_err()
+            .to_string()
+            .contains("another account"));
+        // Without user.json there is nothing to compare.
+        assert!(Package::from_files(old_layout())
+            .unwrap()
+            .check_owner(Snowflake(7))
+            .is_ok());
     }
 
     #[test]

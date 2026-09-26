@@ -71,7 +71,7 @@ every message you ever sent:
    and servers you have left (marked *left*; Discord no longer lets you delete there). Continue as usual; counts
    are exact and need no searching. **Back to live search** switches back.
 
-The package stays on your computer and is only read, never uploaded. Messages you deleted after requesting it
+The package stays on your computer and is only read, never uploaded. A package of another account is refused. Messages you deleted after requesting it
 are simply counted as deleted again.
 
 ## Command line
@@ -123,7 +123,8 @@ Limitations:
 
 - You can only delete messages in servers you are still a member of.
 - The data package does not say which messages have embeds or stickers, so those two filters are not
-  available with it; images, videos and audio are recognised by their attachments only.
+  available with it. Images, videos and audio are recognised by their attachments; to be safe, *keep messages
+  with images/videos* also keeps messages with links, which may show one.
 - System messages (joins, calls, pins) and messages in locked, archived threads cannot be deleted and are
   skipped.
 - Without a data package, EraseCord can only delete what Discord's search finds.

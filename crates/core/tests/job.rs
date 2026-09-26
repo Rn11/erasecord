@@ -591,7 +591,10 @@ fn package_of(messages: &[FakeMessage]) -> Package {
     for channel in &mut channels {
         channel.messages.sort_by_key(|m| std::cmp::Reverse(m.id));
     }
-    Package { channels }
+    Package {
+        owner: Some(Snowflake(ME)),
+        channels,
+    }
 }
 
 async fn run_package_job(
@@ -705,4 +708,56 @@ async fn package_runs_reject_filters_the_package_cannot_answer() {
         ..Default::default()
     };
     assert!(job::preview_package(&package, Snowflake(ME), &targets, &filter).is_err());
+}
+
+#[tokio::test]
+async fn refuses_a_package_of_another_account() {
+    let messages = vec![FakeMessage::in_dm(0, 0)];
+    let package = Package {
+        owner: Some(Snowflake(OTHER)),
+        ..package_of(&messages)
+    };
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+
+    let (summary, _) = run_package_job(&fake, &package, &targets, Filter::default(), fast()).await;
+
+    assert!(summary.error.unwrap().contains("another account"));
+    assert_eq!(fake.delete_calls(), 0);
+}
+
+#[tokio::test]
+async fn keeps_every_pin_of_a_channel_with_many() {
+    for legacy_pins in [false, true] {
+        // 120 pinned messages, one minute apart, and one that is not pinned.
+        let mut messages: Vec<FakeMessage> = (0..120)
+            .map(|minute| FakeMessage {
+                pinned: true,
+                ..FakeMessage::in_dm(minute, 0)
+            })
+            .collect();
+        messages.push(FakeMessage::in_dm(500, 0));
+        let package = package_of(&messages);
+        let mut state = State::with_messages(messages);
+        state.legacy_pins = legacy_pins;
+        let fake = FakeDiscord::start(state).await;
+        let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+        let filter = Filter {
+            skip_pinned: true,
+            ..Default::default()
+        };
+
+        let (summary, events) = run_package_job(&fake, &package, &targets, filter, fast()).await;
+
+        if legacy_pins {
+            // The old endpoint cannot list them all, so nothing is touched.
+            assert_eq!((summary.stats.deleted, summary.stats.skipped), (0, 121));
+            assert!(events.iter().any(
+                |e| matches!(e, Event::ChannelUnreachable { error, .. } if error.contains("pinned"))
+            ));
+        } else {
+            assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 120));
+        }
+        assert_eq!(fake.remaining().len(), if legacy_pins { 121 } else { 120 });
+    }
 }

@@ -182,13 +182,17 @@ impl Filter {
             pattern,
             has: self.has.clone(),
             without: self.without.clone(),
+            embeds_unknown: false,
         })
     }
 }
 
 impl Filter {
     /// Like [`Filter::compile`], for messages from a data package, which does
-    /// not say whether a message has embeds or stickers.
+    /// not say whether a message has embeds or stickers. A link may show an
+    /// image or video embed, so a message with a link is kept when images or
+    /// videos are to be kept, but not counted as one when only messages with
+    /// images or videos are to be deleted.
     pub fn compile_for_package(&self) -> Result<Matcher> {
         let unknown = self
             .has
@@ -201,7 +205,10 @@ impl Filter {
                 has.as_str()
             )));
         }
-        self.compile()
+        Ok(Matcher {
+            embeds_unknown: true,
+            ..self.compile()?
+        })
     }
 }
 
@@ -212,6 +219,8 @@ pub struct Matcher {
     pattern: Option<Regex>,
     has: Vec<Has>,
     without: Vec<Has>,
+    /// The messages come without their embeds (data package).
+    embeds_unknown: bool,
 }
 
 impl Matcher {
@@ -225,7 +234,12 @@ impl Matcher {
                 .as_ref()
                 .is_none_or(|re| re.is_match(&message.content))
             && (self.has.is_empty() || self.has.iter().any(|h| h.found_in(message)))
-            && !self.without.iter().any(|h| h.found_in(message))
+            && !self.without.iter().any(|h| {
+                h.found_in(message)
+                    || (self.embeds_unknown
+                        && matches!(h, Has::Image | Has::Video)
+                        && contains_link(&message.content))
+            })
     }
 }
 
@@ -369,6 +383,23 @@ mod tests {
         assert!(!keep_files.matches(&gif));
         assert!(keep_files.matches(&link));
         assert!(Has::Link.found_in(&link) && !Has::Link.found_in(&voice));
+    }
+
+    #[test]
+    fn package_links_may_be_media() {
+        let link = message("https://i.imgur.com/cat.png");
+        let keep_images = Filter {
+            without: vec![Has::Image],
+            ..Default::default()
+        };
+        assert!(matcher(keep_images.clone()).matches(&link));
+        assert!(!keep_images.compile_for_package().unwrap().matches(&link));
+        // Not the other way round: a link is no reason to delete.
+        let only_images = Filter {
+            has: vec![Has::Image],
+            ..Default::default()
+        };
+        assert!(!only_images.compile_for_package().unwrap().matches(&link));
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub enum Error {
     #[error("{0}")]
     InvalidFilter(String),
 
+    /// Discord's answer is not enough to decide safely.
+    #[error("{0}")]
+    Incomplete(String),
+
     #[error("could not read the data package: {0}")]
     Package(String),
 

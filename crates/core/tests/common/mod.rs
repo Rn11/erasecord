@@ -84,6 +84,8 @@ pub struct State {
     pub delete_errors: HashMap<u64, (u16, u64)>,
     /// Search ignores `channel_id`, like a misbehaving index.
     pub ignore_channel_filter: bool,
+    /// Only the old, unpaged pins endpoint exists (at most 50 pins).
+    pub legacy_pins: bool,
     /// Channels that answer 404 Unknown Channel.
     pub gone_channels: Vec<u64>,
     /// Servers whose search answers 403 Missing Access.
@@ -142,6 +144,11 @@ impl FakeDiscord {
         Mock::given(method("GET"))
             .and(path_regex(r"^/api/v9/channels/\d+/pins$"))
             .respond_with(PinsResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+/messages/pins$"))
+            .respond_with(PagedPinsResponder(state.clone()))
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
@@ -380,9 +387,51 @@ impl Respond for PinsResponder {
             .messages
             .iter()
             .filter(|m| m.channel_id == id && m.pinned)
+            .take(50)
             .map(message_json)
             .collect();
         ResponseTemplate::new(200).set_body_json(pins)
+    }
+}
+
+/// Pins newest first; `pinned_at` is faked from the message ID's time.
+struct PagedPinsResponder(Arc<Mutex<State>>);
+
+impl Respond for PagedPinsResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        if state.legacy_pins {
+            return error_json(404, 0, "404: Not Found");
+        }
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let query: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
+        let limit: usize = query["limit"].parse().unwrap();
+        let before = query.get("before").cloned();
+        let mut pins: Vec<&FakeMessage> = state
+            .messages
+            .iter()
+            .filter(|m| m.channel_id == id && m.pinned)
+            .collect();
+        pins.sort_by_key(|m| std::cmp::Reverse(m.id));
+        let pinned_at = |m: &FakeMessage| Snowflake(m.id).created_at().to_rfc3339();
+        let rest: Vec<&FakeMessage> = pins
+            .into_iter()
+            .filter(|m| before.as_ref().is_none_or(|b| pinned_at(m) < *b))
+            .collect();
+        let items: Vec<Value> = rest
+            .iter()
+            .take(limit)
+            .map(|m| json!({ "pinned_at": pinned_at(m), "message": message_json(m) }))
+            .collect();
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "items": items, "has_more": rest.len() > limit }))
     }
 }
 

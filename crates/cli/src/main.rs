@@ -350,6 +350,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             options,
         } => {
             let (client, me) = online();
+            if let Some(package) = &package {
+                package
+                    .check_owner(me)
+                    .context("cannot use this data package")?;
+            }
             let targets = match &package {
                 Some(package) => select_from_package(package, &selection)?,
                 None => select(&client, &selection).await?,
@@ -400,6 +405,9 @@ fn load_package(path: &Path) -> Result<Package> {
         package.message_count(),
         package.channels.len()
     );
+    if package.owner.is_none() {
+        eprintln!("warning: the package has no account/user.json, so it cannot be checked that it is yours");
+    }
     Ok(package)
 }
 
