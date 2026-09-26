@@ -22,6 +22,10 @@ want. Open source, for Windows, macOS and Linux, as a desktop app and as a comma
   message that would be deleted.
 - **Keep pinned messages** if you like, or **overwrite** each message with random text before deleting it.
 - **Pause, resume or stop** at any time; live progress with an activity log and time estimate.
+- **Keep a record:** save the list of deleted messages (or, after a dry run, the ones that would be deleted)
+  with their text and attachment links as CSV or JSON.
+- **In your language:** English, German, Spanish, Swedish and Ukrainian. The app follows your system language,
+  and you can pick another one at any time.
 - **Gentle with Discord:** strictly one request at a time, honours rate limits and retries temporary errors.
 - **Your token stays with you:** it is only sent to discord.com. Optionally it is remembered in your system's
   credential store (Keychain, Windows Credential Manager, Secret Service).
@@ -56,7 +60,11 @@ Your token gives full access to your account: never share it. Changing your Disc
    *Content* you can narrow it down to words, links, attachments and so on.
 3. Click **Count messages** to see how many of your messages match.
 4. Click **Delete** (or first **List them first (dry run)**) and watch the progress. You can pause or stop at any
-   point.
+   point. When it is finished, **Save list…** saves every message of the run as CSV (opens in any spreadsheet
+   program) or JSON.
+
+The language menu on the login screen and in the top bar switches the language; *System language* follows your
+computer's setting.
 
 ### Using your data package
 
@@ -71,8 +79,9 @@ every message you ever sent:
    and servers you have left (marked *left*; Discord no longer lets you delete there). Continue as usual; counts
    are exact and need no searching. **Back to live search** switches back.
 
-The package stays on your computer and is only read, never uploaded. A package of another account is refused. Messages you deleted after requesting it
-are simply counted as deleted again.
+The package stays on your computer and is only read, never uploaded. A package of another account is refused.
+Messages you deleted after requesting it are simply counted as deleted again. The package knows the people in a
+DM only by their ID, so DMs and group DMs you still have open are shown with their current names.
 
 ## Command line
 
@@ -85,6 +94,7 @@ erasecord channels 81384788765712384              # the channels of a server, fo
 erasecord delete -c 81384788765712390 --contains "party tonight" --without image,video
 erasecord list --friends                          # also friends whose DM is closed, for --dm-with
 erasecord delete --package package.zip --all-dms --has link --overwrite
+erasecord delete --all-servers --before 1y --dry-run --export old-messages.csv
 ```
 
 - Choose targets with `--target/-t <ID>` (repeatable), `--channel/-c <ID>` (narrows its server down to those
@@ -96,6 +106,9 @@ erasecord delete --package package.zip --all-dms --has link --overwrite
   before deleting it.
 - `--package <PATH>` takes the messages from your data package (`.zip` or extracted folder) instead of
   searching; `list --package` and `preview --package` work without a token.
+- `--export FILE` saves every deleted message (with `--dry-run`: every message that would be deleted) with its
+  text and attachment links, as JSON for a `.json` file and CSV otherwise. The file is written while deleting,
+  so it is complete even if you stop early.
 - Dates: `YYYY-MM-DD` (local midnight), an RFC 3339 timestamp, or an age like `30d`, `12w`, `6m`, `1y`.
   `--after` is inclusive, `--before` exclusive.
 - `delete` shows the preview and asks for confirmation unless you pass `--yes`.
@@ -173,7 +186,7 @@ tools/            fake Discord API for development
 
 ## Roadmap
 
-- Exporting a list of what was deleted.
+- Logging in with your Discord account instead of a token.
 - Code-signed builds for macOS and Windows.
 
 ## License
