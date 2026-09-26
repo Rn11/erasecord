@@ -24,6 +24,9 @@ pub enum Error {
     #[error("unexpected response from Discord: {0}")]
     Decode(#[from] serde_json::Error),
 
+    #[error("{0}")]
+    InvalidFilter(String),
+
     #[error("cancelled")]
     Cancelled,
 }

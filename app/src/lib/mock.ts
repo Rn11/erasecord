@@ -36,8 +36,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function countFor(target: Target, filter: Filter): number {
   if (target.id === "3007") return 0;
-  const count = ((Number(target.id) * 37) % 160) + 8;
-  return filter.after || filter.before ? Math.round(count * 0.4) : count;
+  let count = ((Number(target.id) * 37) % 160) + 8;
+  if (filter.after || filter.before) count = Math.round(count * 0.4);
+  if (filter.content || filter.has.length) count = Math.round(count * 0.15);
+  return count;
 }
 
 const job = { paused: false, cancelled: false };
@@ -64,7 +66,10 @@ async function simulate(selected: Target[], filter: Filter, dryRun: boolean) {
       }
       await sleep(dryRun ? 15 : 70);
       const message_id = String(900_000 + i);
-      if (filter.skip_pinned && i % 23 === 7) {
+      if ((filter.pattern || filter.without.length) && i % 5 === 2) {
+        stats.skipped++;
+        await send({ type: "skipped", target_id: target.id, message_id, reason: "excluded" });
+      } else if (filter.skip_pinned && i % 23 === 7) {
         stats.skipped++;
         await send({ type: "skipped", target_id: target.id, message_id, reason: "pinned" });
       } else if (i % 41 === 11) {

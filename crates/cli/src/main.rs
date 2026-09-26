@@ -9,7 +9,9 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use purgecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
-use purgecord_core::{list_targets, Client, ClientConfig, Notice, Snowflake, Target, TargetKind};
+use purgecord_core::{
+    list_targets, Client, ClientConfig, Has, Notice, Snowflake, Target, TargetKind,
+};
 use tokio::sync::mpsc;
 
 #[derive(Parser)]
@@ -40,6 +42,8 @@ enum Command {
         selection: Selection,
         #[command(flatten)]
         range: Range,
+        #[command(flatten)]
+        content: Content,
     },
     /// Delete your messages that match.
     Delete {
@@ -47,6 +51,8 @@ enum Command {
         selection: Selection,
         #[command(flatten)]
         range: Range,
+        #[command(flatten)]
+        content: Content,
         #[command(flatten)]
         options: DeleteOptions,
     },
@@ -77,6 +83,24 @@ struct Range {
 }
 
 #[derive(Args)]
+struct Content {
+    /// Only messages containing all of these words (any case), e.g. --contains "party tonight".
+    #[arg(long, value_name = "WORDS")]
+    contains: Option<String>,
+    /// Only messages whose text matches this regular expression (any case). Checked by
+    /// purgecord only, so the counts in the preview can be too high.
+    #[arg(long, value_name = "REGEX")]
+    pattern: Option<String>,
+    /// Only messages with any of these: link, file, image, video, sound, embed, sticker.
+    /// Repeat or separate with commas.
+    #[arg(long, value_name = "KIND", value_delimiter = ',')]
+    has: Vec<Has>,
+    /// Keep messages with any of these (same kinds as --has), e.g. --without image,video.
+    #[arg(long, value_name = "KIND", value_delimiter = ',')]
+    without: Vec<Has>,
+}
+
+#[derive(Args)]
 struct DeleteOptions {
     /// Keep pinned messages.
     #[arg(long)]
@@ -98,37 +122,46 @@ struct DeleteOptions {
     search_delay: u64,
 }
 
-impl Range {
-    fn filter(&self, skip_pinned: bool) -> Result<Filter> {
-        if let (Some(after), Some(before)) = (self.after, self.before) {
-            if after >= before {
-                bail!("--after must be earlier than --before");
-            }
+fn build_filter(range: &Range, content: &Content, skip_pinned: bool) -> Result<Filter> {
+    if let (Some(after), Some(before)) = (range.after, range.before) {
+        if after >= before {
+            bail!("--after must be earlier than --before");
         }
-        Ok(Filter {
-            after: self.after,
-            before: self.before,
-            skip_pinned,
-        })
     }
+    let filter = Filter {
+        after: range.after,
+        before: range.before,
+        skip_pinned,
+        content: content.contains.clone(),
+        pattern: content.pattern.clone(),
+        has: content.has.clone(),
+        without: content.without.clone(),
+    };
+    filter.compile()?;
+    Ok(filter)
 }
 
 impl Command {
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
-        let (selection, range, needs_confirmation) = match self {
+        let (selection, range, content, needs_confirmation) = match self {
             Command::List { .. } => return Ok(()),
-            Command::Preview { selection, range } => (selection, range, false),
+            Command::Preview {
+                selection,
+                range,
+                content,
+            } => (selection, range, content, false),
             Command::Delete {
                 selection,
                 range,
+                content,
                 options,
-            } => (selection, range, !options.dry_run && !options.yes),
+            } => (selection, range, content, !options.dry_run && !options.yes),
         };
         if selection.targets.is_empty() && !selection.all_servers && !selection.all_dms {
             bail!("choose what to clean up: --target <ID>, --all-servers and/or --all-dms (see `purgecord list`)");
         }
-        range.filter(false)?;
+        build_filter(range, content, false)?;
         if needs_confirmation && !io::stdin().is_terminal() {
             bail!("refusing to delete without confirmation; pass --yes to skip it");
         }
@@ -172,9 +205,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        Command::Preview { selection, range } => {
+        Command::Preview {
+            selection,
+            range,
+            content,
+        } => {
             let targets = select(&client, &selection).await?;
-            let filter = range.filter(false)?;
+            let filter = build_filter(&range, &content, false)?;
             preview(
                 &client,
                 me.id,
@@ -189,10 +226,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::Delete {
             selection,
             range,
+            content,
             options,
         } => {
             let targets = select(&client, &selection).await?;
-            let filter = range.filter(options.skip_pinned)?;
+            let filter = build_filter(&range, &content, options.skip_pinned)?;
             let job_options = JobOptions {
                 delete_delay_ms: options.delete_delay,
                 search_delay_ms: options.search_delay,
@@ -296,6 +334,11 @@ async fn preview(
     println!("{:>8}  total", total);
     if filter.skip_pinned {
         println!("          (pinned messages are included in the counts but will be kept)");
+    }
+    if filter.checks_locally() {
+        println!(
+            "          (--pattern/--without are applied while deleting; fewer messages may match)"
+        );
     }
     Ok(total)
 }
@@ -568,6 +611,42 @@ mod tests {
             after: parse_time("2024-02-01").ok(),
             before: parse_time("2024-01-01").ok(),
         };
-        assert!(range.filter(false).is_err());
+        assert!(build_filter(&range, &no_content(), false).is_err());
+    }
+
+    fn no_content() -> Content {
+        Content {
+            contains: None,
+            pattern: None,
+            has: vec![],
+            without: vec![],
+        }
+    }
+
+    #[test]
+    fn content_flags_parse() {
+        let cli = Cli::try_parse_from([
+            "purgecord",
+            "preview",
+            "--all-dms",
+            "--has",
+            "link,image",
+            "--without",
+            "file",
+            "--pattern",
+            "^gg",
+        ])
+        .unwrap();
+        let Command::Preview { range, content, .. } = cli.command else {
+            panic!("expected preview");
+        };
+        let filter = build_filter(&range, &content, false).unwrap();
+        assert_eq!(filter.has, [Has::Link, Has::Image]);
+        assert_eq!(filter.without, [Has::File]);
+        let bad = Content {
+            pattern: Some("(".into()),
+            ..no_content()
+        };
+        assert!(build_filter(&range, &bad, false).is_err());
     }
 }

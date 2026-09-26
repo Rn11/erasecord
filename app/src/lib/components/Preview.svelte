@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { describeFilter, plural } from "$lib/format";
+  import { checksLocally, describeFilter, plural } from "$lib/format";
   import type { Filter, PreviewEntry, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -90,6 +90,12 @@
   {/if}
   {#if !counting && filter.skip_pinned && total > 0}
     <p class="small muted">Pinned messages are included in these numbers and will be kept.</p>
+  {/if}
+  {#if !counting && checksLocally(filter) && total > 0}
+    <p class="small muted">
+      The regular expression and “keep messages with” are checked while deleting, so fewer messages may be deleted than
+      counted here. A dry run shows exactly which ones.
+    </p>
   {/if}
 
   <footer>

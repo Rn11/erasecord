@@ -14,43 +14,12 @@ use tokio_util::sync::CancellationToken;
 use crate::client::{Client, Notice};
 use crate::delete::{self, Outcome, SkipReason};
 use crate::error::{Error, Result};
+pub use crate::filter::Filter;
+use crate::filter::Matcher;
 use crate::models::Message;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
-
-/// Which messages to delete.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Filter {
-    /// Only messages sent at or after this time.
-    pub after: Option<DateTime<Utc>>,
-    /// Only messages sent before this time.
-    pub before: Option<DateTime<Utc>>,
-    /// Leave pinned messages alone.
-    pub skip_pinned: bool,
-}
-
-impl Filter {
-    fn search_query(&self, author: Snowflake) -> SearchQuery {
-        SearchQuery {
-            author_id: Some(author),
-            // One below the bound, so it works whether Discord treats min_id as
-            // inclusive or exclusive; `contains` drops anything too early.
-            min_id: self
-                .after
-                .map(|t| Snowflake(Snowflake::from_datetime(t).0.saturating_sub(1))),
-            max_id: self.before.map(Snowflake::from_datetime),
-        }
-    }
-
-    /// Whether a message with this ID was sent inside the time range.
-    pub fn contains(&self, id: Snowflake) -> bool {
-        let sent = id.created_at();
-        self.after.is_none_or(|after| sent >= after)
-            && self.before.is_none_or(|before| sent < before)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -240,6 +209,7 @@ pub async fn preview(
     control: &JobControl,
     mut on_entry: impl FnMut(usize, &PreviewEntry),
 ) -> Result<Vec<PreviewEntry>> {
+    filter.compile()?;
     let query = filter.search_query(me);
     let mut entries = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
@@ -274,6 +244,18 @@ pub async fn run(
     control: &JobControl,
     events: mpsc::UnboundedSender<Event>,
 ) -> Summary {
+    let matcher = match filter.compile() {
+        Ok(matcher) => matcher,
+        Err(err) => {
+            let summary = Summary {
+                stats: Stats::default(),
+                cancelled: false,
+                error: Some(err.to_string()),
+            };
+            let _ = events.send(Event::Finished(summary.clone()));
+            return summary;
+        }
+    };
     let notices = events.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
         let _ = notices.send(Event::Notice { notice });
@@ -287,6 +269,7 @@ pub async fn run(
         control,
         events: &events,
         query: filter.search_query(me),
+        matcher,
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
@@ -336,6 +319,7 @@ struct Job<'a> {
     control: &'a JobControl,
     events: &'a mpsc::UnboundedSender<Event>,
     query: SearchQuery,
+    matcher: Matcher,
 }
 
 impl Job<'_> {
@@ -407,7 +391,9 @@ impl Job<'_> {
         if message.author.id != self.me || !self.filter.contains(message.id) {
             return Ok(());
         }
-        let skip = if self.filter.skip_pinned && message.pinned {
+        let skip = if !self.matcher.matches(&message) {
+            Some(SkipReason::Excluded)
+        } else if self.filter.skip_pinned && message.pinned {
             Some(SkipReason::Pinned)
         } else if !delete::is_deletable_kind(message.kind) {
             Some(SkipReason::SystemMessage)

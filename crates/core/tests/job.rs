@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use common::*;
 use purgecord_core::{
-    job, Event, Filter, JobControl, JobOptions, SkipReason, Snowflake, Summary, Target,
+    job, Event, Filter, Has, JobControl, JobOptions, SkipReason, Snowflake, Summary, Target,
 };
 use tokio::sync::mpsc;
 use wiremock::matchers::any;
@@ -56,7 +56,7 @@ async fn deletes_only_own_messages_inside_the_range() {
     let filter = Filter {
         after: Some(at(10)),
         before: Some(at(20)),
-        skip_pinned: false,
+        ..Default::default()
     };
 
     let (summary, events) = run_job(&fake, &[guild_target()], filter, fast()).await;
@@ -361,4 +361,104 @@ async fn preview_counts_matching_messages_per_target() {
         .contains("Missing Access"));
     assert_eq!(progress, [0, 1, 2]);
     assert_eq!(fake.delete_calls(), 0);
+}
+
+fn skip_reasons(events: &[Event]) -> Vec<SkipReason> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Skipped { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn keyword_is_searched_and_checked_again() {
+    let keep = FakeMessage::in_dm(0, 0).with_text("secret meeting later");
+    // The fake search is fuzzy like Discord's and returns this one as well.
+    let fuzzy = FakeMessage::in_dm(1, 0).with_text("the plan");
+    let hit = FakeMessage::in_dm(2, 0).with_text("Secret PLAN, don't tell");
+    let other = FakeMessage::in_dm(3, 0).with_text("hello");
+    let fake = FakeDiscord::start(State::with_messages(vec![
+        keep.clone(),
+        fuzzy.clone(),
+        hit.clone(),
+        other.clone(),
+    ]))
+    .await;
+    let filter = Filter {
+        content: Some("secret plan".into()),
+        ..Default::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 2));
+    assert_eq!(skip_reasons(&events), [SkipReason::Excluded; 2]);
+    let mut expected = vec![keep.id, fuzzy.id, other.id];
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+}
+
+#[tokio::test]
+async fn pattern_and_without_keep_messages() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into()],
+        ..FakeMessage::in_dm(0, 0).with_text("lol look")
+    };
+    let lol = FakeMessage::in_dm(1, 0).with_text("LOL");
+    let other = FakeMessage::in_dm(2, 0).with_text("lollipop");
+    let fake = FakeDiscord::start(State::with_messages(vec![
+        photo.clone(),
+        lol.clone(),
+        other.clone(),
+    ]))
+    .await;
+    let filter = Filter {
+        pattern: Some(r"\blol\b".into()),
+        without: vec![Has::File],
+        ..Default::default()
+    };
+
+    let (summary, _) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 2));
+    let mut expected = vec![photo.id, other.id];
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+}
+
+#[tokio::test]
+async fn has_file_only_deletes_messages_with_attachments() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into()],
+        ..FakeMessage::in_dm(0, 0)
+    };
+    let text = FakeMessage::in_dm(1, 0);
+    let fake = FakeDiscord::start(State::with_messages(vec![photo.clone(), text.clone()])).await;
+    let filter = Filter {
+        has: vec![Has::File],
+        ..Default::default()
+    };
+
+    let (summary, _) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(fake.remaining(), vec![text.id]);
+}
+
+#[tokio::test]
+async fn invalid_pattern_stops_before_any_request() {
+    let fake = FakeDiscord::start(State::with_messages(vec![FakeMessage::in_dm(0, 0)])).await;
+    let filter = Filter {
+        pattern: Some("([".into()),
+        ..Default::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert!(summary.error.unwrap().contains("regular expression"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(fake.state.lock().unwrap().search_calls, 0);
 }

@@ -3288,6 +3288,7 @@ name = "purgecord-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

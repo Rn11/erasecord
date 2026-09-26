@@ -4,7 +4,15 @@
   import { isTauri } from "@tauri-apps/api/core";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
-  import { displayName, rangeProblem, toFilter, type RangeForm } from "$lib/format";
+  import {
+    contentProblem,
+    displayName,
+    emptyContent,
+    rangeProblem,
+    toFilter,
+    type ContentForm,
+    type RangeForm,
+  } from "$lib/format";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type { Filter, JobOptions, PreviewEntry, Target, User } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -24,11 +32,12 @@
   let targetsError = $state<string | null>(null);
   const selected = new SvelteSet<string>();
   let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
+  let content = $state<ContentForm>(emptyContent());
   let skipPinned = $state(true);
   let options = $state<JobOptions>({ delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, dry_run: false });
 
   // Fixed when counting starts, so the deletion uses exactly what was counted.
-  let filter = $state<Filter>({ after: null, before: null, skip_pinned: true });
+  let filter = $state<Filter>(toFilter({ mode: "all", amount: 1, unit: "days", from: "", to: "" }, true));
   let previewTargets = $state<Target[]>([]);
   let entries = $state<PreviewEntry[]>([]);
   let counting = $state(false);
@@ -110,8 +119,8 @@
   }
 
   async function count() {
-    if (selectedTargets.length === 0 || rangeProblem(range)) return;
-    filter = toFilter(range, skipPinned);
+    if (selectedTargets.length === 0 || rangeProblem(range) || contentProblem(content)) return;
+    filter = toFilter(range, skipPinned, content);
     previewTargets = selectedTargets;
     entries = [];
     previewError = null;
@@ -207,6 +216,7 @@
         error={targetsError}
         {selected}
         bind:range
+        bind:content
         bind:skipPinned
         bind:options
         onReload={loadTargets}

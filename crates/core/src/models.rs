@@ -65,6 +65,10 @@ pub struct Message {
     pub pinned: bool,
     #[serde(default)]
     pub attachments: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub embeds: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub sticker_items: Vec<serde_json::Value>,
     /// Set on search results: marks the message that matched, as opposed to
     /// context messages around it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

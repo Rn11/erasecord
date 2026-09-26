@@ -19,12 +19,22 @@ export interface Target {
   icon_url: string | null;
 }
 
+export type Has = "link" | "file" | "image" | "video" | "sound" | "embed" | "sticker";
+
 export interface Filter {
   /** RFC 3339; only messages sent at or after this time. */
   after: string | null;
   /** RFC 3339; only messages sent before this time. */
   before: string | null;
   skip_pinned: boolean;
+  /** Words that must all appear in the text. */
+  content: string | null;
+  /** Case-insensitive regular expression (Rust syntax), checked locally. */
+  pattern: string | null;
+  /** Only messages with any of these. */
+  has: Has[];
+  /** Keep messages with any of these. */
+  without: Has[];
 }
 
 export interface JobOptions {
@@ -62,7 +72,7 @@ export type Notice =
   | { kind: "index_not_ready"; wait_ms: number }
   | { kind: "retrying"; reason: string; attempt: number; wait_ms: number };
 
-export type SkipReason = "pinned" | "system_message" | "no_permission" | "archived_thread";
+export type SkipReason = "pinned" | "excluded" | "system_message" | "no_permission" | "archived_thread";
 
 export type JobEvent =
   | { type: "target_started"; index: number; target_id: Snowflake; name: string }

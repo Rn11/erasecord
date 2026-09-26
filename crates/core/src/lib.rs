@@ -8,6 +8,7 @@
 pub mod client;
 pub mod delete;
 pub mod error;
+pub mod filter;
 pub mod job;
 pub mod models;
 mod ratelimit;
@@ -18,7 +19,8 @@ pub mod targets;
 pub use client::{Client, ClientConfig, Notice, NoticeSink};
 pub use delete::SkipReason;
 pub use error::{Error, Result};
-pub use job::{Event, Filter, JobControl, JobOptions, PreviewEntry, Stats, Summary};
+pub use filter::{Filter, Has};
+pub use job::{Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
 pub use models::{Message, User};
 pub use snowflake::Snowflake;
 pub use targets::{list_targets, Target, TargetKind};

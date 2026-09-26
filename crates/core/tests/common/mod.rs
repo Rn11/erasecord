@@ -28,6 +28,10 @@ pub struct FakeMessage {
     pub author_id: u64,
     pub kind: u8,
     pub pinned: bool,
+    /// Text; `None` means "message <id>".
+    pub content: Option<String>,
+    /// File names of attachments.
+    pub files: Vec<String>,
     /// Only shows up in search results after this many searches.
     pub hidden_for_searches: usize,
 }
@@ -41,7 +45,22 @@ impl FakeMessage {
             author_id,
             kind: 0,
             pinned: false,
+            content: None,
+            files: Vec::new(),
             hidden_for_searches: 0,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.content
+            .clone()
+            .unwrap_or_else(|| format!("message {}", self.id))
+    }
+
+    pub fn with_text(self, content: &str) -> Self {
+        FakeMessage {
+            content: Some(content.into()),
+            ..self
         }
     }
 
@@ -176,10 +195,10 @@ fn message_json(m: &FakeMessage) -> Value {
         "id": m.id.to_string(),
         "channel_id": m.channel_id.to_string(),
         "type": m.kind,
-        "content": format!("message {}", m.id),
+        "content": m.text(),
         "author": user_json(m.author_id, "someone"),
         "pinned": m.pinned,
-        "attachments": [],
+        "attachments": m.files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
         "hit": true,
     })
 }
@@ -203,6 +222,13 @@ impl Respond for SearchResponder {
         }
         let query: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
         let id_param = |name: &str| query.get(name).map(|v| v.parse::<u64>().unwrap());
+        let content = query.get("content").map(|c| c.to_lowercase());
+        let has: Vec<String> = request
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "has")
+            .map(|(_, v)| v.into_owned())
+            .collect();
         let (author, min, max) = (
             id_param("author_id"),
             id_param("min_id"),
@@ -220,6 +246,14 @@ impl Respond for SearchResponder {
             })
             .filter(|m| author.is_none_or(|a| m.author_id == a))
             .filter(|m| min.is_none_or(|min| m.id > min) && max.is_none_or(|max| m.id < max))
+            // Like Discord's search: word-based and fuzzy, so looser than purgecord.
+            .filter(|m| {
+                content.as_deref().is_none_or(|c| {
+                    let text = m.text().to_lowercase();
+                    c.split_whitespace().any(|w| text.contains(w))
+                })
+            })
+            .filter(|m| has.is_empty() || (has.iter().any(|h| h == "file") && !m.files.is_empty()))
             .collect();
         found.sort_by_key(|m| std::cmp::Reverse(m.id));
         let page: Vec<Value> = found

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use common::*;
 use purgecord_core::search::{Scope, SearchQuery};
-use purgecord_core::{list_targets, Client, Error, Notice, Snowflake, TargetKind};
+use purgecord_core::{list_targets, Client, Error, Has, Notice, Snowflake, TargetKind};
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -26,6 +26,8 @@ async fn sends_the_token_and_search_parameters() {
         .and(query_param("min_id", "5"))
         .and(query_param("max_id", "9"))
         .and(query_param("sort_order", "desc"))
+        .and(query_param("content", "hello world"))
+        .and(query_param("has", "link"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "total_results": 3, "messages": [] })),
         )
@@ -36,6 +38,8 @@ async fn sends_the_token_and_search_parameters() {
         author_id: Some(Snowflake(ME)),
         min_id: Some(Snowflake(5)),
         max_id: Some(Snowflake(9)),
+        content: Some("hello world".into()),
+        has: vec![Has::Link],
     };
 
     let response = client_for(&server)

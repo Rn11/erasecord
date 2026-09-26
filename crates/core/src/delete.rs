@@ -9,6 +9,8 @@ use crate::error::{Error, Result};
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
     Pinned,
+    /// Kept because of the text or content filters.
+    Excluded,
     /// Join notices, call logs and similar messages cannot be deleted.
     SystemMessage,
     NoPermission,
@@ -20,6 +22,7 @@ impl SkipReason {
     pub fn describe(self) -> &'static str {
         match self {
             SkipReason::Pinned => "pinned",
+            SkipReason::Excluded => "excluded by filter",
             SkipReason::SystemMessage => "system message",
             SkipReason::NoPermission => "no permission",
             SkipReason::ArchivedThread => "archived thread",

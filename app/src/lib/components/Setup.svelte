@@ -1,7 +1,16 @@
 <script lang="ts">
   import type { SvelteSet } from "svelte/reactivity";
-  import { describeFilter, plural, rangeProblem, toFilter, type RangeForm } from "$lib/format";
-  import type { JobOptions, Target } from "$lib/types";
+  import {
+    HAS_KINDS,
+    contentProblem,
+    describeFilter,
+    plural,
+    rangeProblem,
+    toFilter,
+    type ContentForm,
+    type RangeForm,
+  } from "$lib/format";
+  import type { Has, JobOptions, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
   let {
@@ -10,6 +19,7 @@
     error,
     selected,
     range = $bindable(),
+    content = $bindable(),
     skipPinned = $bindable(),
     options = $bindable(),
     onReload,
@@ -20,6 +30,7 @@
     error: string | null;
     selected: SvelteSet<string>;
     range: RangeForm;
+    content: ContentForm;
     skipPinned: boolean;
     options: JobOptions;
     onReload: () => void;
@@ -37,8 +48,16 @@
   const allVisibleSelected = $derived(visible.length > 0 && visible.every((t) => selected.has(t.id)));
   const selectedServers = $derived(servers.filter((t) => selected.has(t.id)).length);
   const selectedDms = $derived(dms.filter((t) => selected.has(t.id)).length);
-  const problem = $derived(rangeProblem(range));
-  const summary = $derived(problem ? null : describeFilter(toFilter(range, skipPinned)));
+  const problem = $derived(rangeProblem(range) ?? contentProblem(content));
+  const summary = $derived(problem ? null : describeFilter(toFilter(range, skipPinned, content)));
+  const contentActive = $derived(
+    !!content.contains.trim() || !!content.pattern.trim() || content.has.length > 0 || content.without.length > 0,
+  );
+
+  function toggleKind(list: "has" | "without", kind: Has) {
+    const current = content[list];
+    content[list] = current.includes(kind) ? current.filter((k) => k !== kind) : [...current, kind];
+  }
 
   function toggle(id: string) {
     if (selected.has(id)) selected.delete(id);
@@ -139,6 +158,54 @@
         <input type="radio" name="range" value="all" bind:group={range.mode} />
         <span>All my messages</span>
       </label>
+    </fieldset>
+
+    <fieldset>
+      <legend>
+        Content
+        {#if contentActive}
+          <button type="button" class="link small" onclick={() => (content = { contains: "", pattern: "", has: [], without: [] })}>
+            reset
+          </button>
+        {/if}
+      </legend>
+      <label class="field">
+        <span class="small muted">Containing all of these words</span>
+        <input type="text" placeholder="Any text" bind:value={content.contains} spellcheck="false" />
+      </label>
+      <div class="field">
+        <span class="small muted">Only messages with</span>
+        <div class="chips" role="group" aria-label="Only messages with">
+          {#each HAS_KINDS as kind (kind.value)}
+            <label class="chip" class:on={content.has.includes(kind.value)}>
+              <input type="checkbox" checked={content.has.includes(kind.value)} onchange={() => toggleKind("has", kind.value)} />
+              {kind.label}
+            </label>
+          {/each}
+        </div>
+      </div>
+      <div class="field">
+        <span class="small muted">Keep messages with</span>
+        <div class="chips" role="group" aria-label="Keep messages with">
+          {#each HAS_KINDS as kind (kind.value)}
+            <label class="chip keep" class:on={content.without.includes(kind.value)}>
+              <input
+                type="checkbox"
+                checked={content.without.includes(kind.value)}
+                onchange={() => toggleKind("without", kind.value)}
+              />
+              {kind.label}
+            </label>
+          {/each}
+        </div>
+      </div>
+      <details open={!!content.pattern}>
+        <summary class="small">Regular expression</summary>
+        <label class="field regex">
+          <input type="text" placeholder="e.g. ^(lol|ok)$" bind:value={content.pattern} spellcheck="false" aria-label="Regular expression" />
+          <span class="small muted">Case-insensitive. Checked by purgecord while deleting, so counts can be too high.</span>
+        </label>
+      </details>
     </fieldset>
 
     <fieldset>
@@ -335,6 +402,70 @@
     font-weight: 600;
     margin-bottom: 8px;
     padding: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .field {
+    display: grid;
+    gap: 5px;
+  }
+
+  .regex {
+    margin-top: 8px;
+  }
+
+  .regex input {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .chip input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .chip:has(input:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .chip.on {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+  }
+
+  .chip.keep.on {
+    background: var(--ok-soft);
+    border-color: var(--ok);
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-weight: 400;
+    color: var(--accent);
+    cursor: pointer;
   }
 
   .choice {
