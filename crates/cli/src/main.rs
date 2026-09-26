@@ -567,6 +567,17 @@ impl Progress {
                 self.line(format!("  failed to delete {message_id}: {error}"));
             }
             Event::TargetFailed { error, .. } => self.line(format!("  could not search: {error}")),
+            Event::ChannelUnreachable {
+                channel_id,
+                messages,
+                error,
+                ..
+            } => {
+                self.stats.skipped += messages;
+                self.line(format!(
+                    "  skipped {messages} message(s) in channel {channel_id}: {error}"
+                ));
+            }
             Event::TargetFinished { stats, .. } => self.line(format!(
                 "  {} {}, {} skipped, {} failed",
                 stats.deleted, self.deleted_label, stats.skipped, stats.failed

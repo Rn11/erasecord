@@ -27,6 +27,9 @@ pub enum Error {
     #[error("{0}")]
     InvalidFilter(String),
 
+    #[error("could not read the data package: {0}")]
+    Package(String),
+
     #[error("cancelled")]
     Cancelled,
 }

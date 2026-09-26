@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::models::{Channel, Guild, Relationship, SearchResponse, User};
+use crate::models::{Channel, Guild, Message, Relationship, SearchResponse, User};
 use crate::ratelimit::{self, RateLimiter};
 use crate::search::{Scope, SearchQuery};
 use crate::snowflake::Snowflake;
@@ -181,6 +181,11 @@ impl Client {
 
     pub async fn channel(&self, channel_id: Snowflake) -> Result<Channel> {
         self.get(&format!("/channels/{channel_id}"), &[]).await
+    }
+
+    /// The pinned messages of a channel.
+    pub async fn pinned_messages(&self, channel_id: Snowflake) -> Result<Vec<Message>> {
+        self.get(&format!("/channels/{channel_id}/pins"), &[]).await
     }
 
     pub async fn search(&self, scope: Scope, query: &SearchQuery) -> Result<SearchResponse> {

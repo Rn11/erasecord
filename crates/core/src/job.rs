@@ -17,6 +17,7 @@ use crate::error::{Error, Result};
 pub use crate::filter::Filter;
 use crate::filter::Matcher;
 use crate::models::Message;
+use crate::package::Package;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
@@ -113,6 +114,14 @@ pub enum Event {
     Failed {
         target_id: Snowflake,
         message_id: Snowflake,
+        error: String,
+    },
+    /// A channel from the data package cannot be reached (deleted, or no
+    /// longer accessible); its messages are skipped.
+    ChannelUnreachable {
+        target_id: Snowflake,
+        channel_id: Snowflake,
+        messages: u64,
         error: String,
     },
     /// Searching this target failed; the job continues with the next one.
@@ -242,6 +251,39 @@ pub async fn preview(
     Ok(entries)
 }
 
+/// Counts the matching messages of each target in a data package. Exact,
+/// except that pinned messages are only known while deleting.
+pub fn preview_package(
+    package: &Package,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+) -> Result<Vec<PreviewEntry>> {
+    let matcher = filter.compile_for_package()?;
+    Ok(targets
+        .iter()
+        .map(|target| {
+            let count = package
+                .channels_of(target)
+                .map(|channel| {
+                    channel
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            filter.contains(m.id) && matcher.matches(&m.to_message(channel.id, me))
+                        })
+                        .count() as u64
+                })
+                .sum();
+            PreviewEntry {
+                target: target.clone(),
+                count: Some(count),
+                error: None,
+            }
+        })
+        .collect())
+}
+
 /// Deletes the matching messages in `targets`. Progress is reported through
 /// `events`, ending with [`Event::Finished`].
 pub async fn run(
@@ -253,7 +295,67 @@ pub async fn run(
     control: &JobControl,
     events: mpsc::UnboundedSender<Event>,
 ) -> Summary {
-    let matcher = match filter.compile() {
+    run_from(
+        Source::Search,
+        client,
+        me,
+        targets,
+        filter,
+        options,
+        control,
+        events,
+    )
+    .await
+}
+
+/// Like [`run`], but takes the messages from a data package instead of
+/// searching for them. `targets` come from [`Package::targets`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_package(
+    client: &Client,
+    me: Snowflake,
+    package: &Package,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+    events: mpsc::UnboundedSender<Event>,
+) -> Summary {
+    run_from(
+        Source::Package(package),
+        client,
+        me,
+        targets,
+        filter,
+        options,
+        control,
+        events,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Search,
+    Package(&'a Package),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_from(
+    source: Source<'_>,
+    client: &Client,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+    events: mpsc::UnboundedSender<Event>,
+) -> Summary {
+    let compiled = match source {
+        Source::Search => filter.compile(),
+        Source::Package(_) => filter.compile_for_package(),
+    };
+    let matcher = match compiled {
         Ok(matcher) => matcher,
         Err(err) => {
             let summary = Summary {
@@ -289,7 +391,10 @@ pub async fn run(
             name: target.name.clone(),
         });
         let mut stats = Stats::default();
-        let result = job.purge_target(target, &mut stats).await;
+        let result = match source {
+            Source::Search => job.purge_target(target, &mut stats).await,
+            Source::Package(package) => job.purge_known(target, package, &mut stats).await,
+        };
         total.add(stats);
         match result {
             Ok(()) => {}
@@ -393,6 +498,82 @@ impl Job<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Deletes the matching messages of a data package, channel by channel.
+    /// Each channel is looked up first, so channels that are gone or out of
+    /// reach cost one request instead of one per message.
+    async fn purge_known(
+        &self,
+        target: &Target,
+        package: &Package,
+        stats: &mut Stats,
+    ) -> Result<()> {
+        let work: Vec<(Snowflake, Vec<Message>)> = package
+            .channels_of(target)
+            .filter_map(|channel| {
+                let messages: Vec<Message> = channel
+                    .messages
+                    .iter()
+                    .filter(|m| self.filter.contains(m.id))
+                    .map(|m| m.to_message(channel.id, self.me))
+                    .filter(|m| self.matcher.matches(m))
+                    .collect();
+                (!messages.is_empty()).then_some((channel.id, messages))
+            })
+            .collect();
+        self.emit(Event::TargetEstimate {
+            target_id: target.id,
+            total: work.iter().map(|(_, m)| m.len() as u64).sum(),
+        });
+
+        for (channel_id, messages) in work {
+            self.control.checkpoint().await?;
+            let pinned = match self.reach_channel(channel_id).await? {
+                Ok(pinned) => pinned,
+                Err(error) => {
+                    stats.skipped += messages.len() as u64;
+                    self.emit(Event::ChannelUnreachable {
+                        target_id: target.id,
+                        channel_id,
+                        messages: messages.len() as u64,
+                        error,
+                    });
+                    continue;
+                }
+            };
+            for mut message in messages {
+                message.pinned = pinned.contains(&message.id);
+                self.handle(target, message, stats).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that a channel still exists and can be reached, and returns its
+    /// pinned messages if those are to be kept. The inner error says why the
+    /// channel is out of reach.
+    async fn reach_channel(
+        &self,
+        channel_id: Snowflake,
+    ) -> Result<std::result::Result<HashSet<Snowflake>, String>> {
+        match self.control.guard(self.client.channel(channel_id)).await? {
+            Ok(_) => {}
+            Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+            Err(err) => return Ok(Err(err.to_string())),
+        }
+        if !self.filter.skip_pinned {
+            return Ok(Ok(HashSet::new()));
+        }
+        match self
+            .control
+            .guard(self.client.pinned_messages(channel_id))
+            .await?
+        {
+            Ok(pins) => Ok(Ok(pins.into_iter().map(|m| m.id).collect())),
+            Err(Error::Unauthorized) => Err(Error::Unauthorized),
+            Err(err) => Ok(Err(format!("could not check its pinned messages: {err}"))),
+        }
     }
 
     async fn handle(&self, target: &Target, message: Message, stats: &mut Stats) -> Result<()> {

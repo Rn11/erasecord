@@ -84,6 +84,8 @@ pub struct State {
     pub delete_errors: HashMap<u64, (u16, u64)>,
     /// Search ignores `channel_id`, like a misbehaving index.
     pub ignore_channel_filter: bool,
+    /// Channels that answer 404 Unknown Channel.
+    pub gone_channels: Vec<u64>,
     /// Servers whose search answers 403 Missing Access.
     pub forbidden_guilds: Vec<u64>,
     pub deleted: Vec<u64>,
@@ -130,6 +132,16 @@ impl FakeDiscord {
         Mock::given(method("DELETE"))
             .and(path_regex(r"^/api/v9/channels/\d+/messages/\d+$"))
             .respond_with(DeleteResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+$"))
+            .respond_with(ChannelResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+/pins$"))
+            .respond_with(PinsResponder(state.clone()))
             .mount(&server)
             .await;
         Mock::given(method("PATCH"))
@@ -319,6 +331,58 @@ impl Respond for DeleteResponder {
         }
         state.deleted.push(message_id);
         ResponseTemplate::new(204).set_delay(delay)
+    }
+}
+
+struct ChannelResponder(Arc<Mutex<State>>);
+
+impl Respond for ChannelResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        if state.gone_channels.contains(&id) {
+            return error_json(404, 10003, "Unknown Channel");
+        }
+        let guild = state
+            .messages
+            .iter()
+            .find(|m| m.channel_id == id)
+            .and_then(|m| m.guild_id);
+        ResponseTemplate::new(200).set_body_json(json!({
+            "id": id.to_string(),
+            "type": if guild.is_some() { 0 } else { 1 },
+            "guild_id": guild.map(|g| g.to_string()),
+        }))
+    }
+}
+
+struct PinsResponder(Arc<Mutex<State>>);
+
+impl Respond for PinsResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let pins: Vec<Value> = state
+            .messages
+            .iter()
+            .filter(|m| m.channel_id == id && m.pinned)
+            .map(message_json)
+            .collect();
+        ResponseTemplate::new(200).set_body_json(pins)
     }
 }
 

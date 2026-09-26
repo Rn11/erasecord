@@ -186,6 +186,25 @@ impl Filter {
     }
 }
 
+impl Filter {
+    /// Like [`Filter::compile`], for messages from a data package, which does
+    /// not say whether a message has embeds or stickers.
+    pub fn compile_for_package(&self) -> Result<Matcher> {
+        let unknown = self
+            .has
+            .iter()
+            .chain(&self.without)
+            .find(|h| matches!(h, Has::Embed | Has::Sticker));
+        if let Some(has) = unknown {
+            return Err(Error::InvalidFilter(format!(
+                "the data package does not say which messages have {}s; remove that condition",
+                has.as_str()
+            )));
+        }
+        self.compile()
+    }
+}
+
 /// The text and content checks of a [`Filter`], ready to use.
 #[derive(Debug, Clone)]
 pub struct Matcher {
