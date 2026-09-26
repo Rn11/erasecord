@@ -174,30 +174,47 @@ impl Client {
 
     pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
         let path = format!("/channels/{channel_id}/messages/{message_id}");
-        self.send(Method::DELETE, &path, &[]).await?;
+        self.send(Method::DELETE, &path, &[], None).await?;
+        Ok(())
+    }
+
+    /// Replaces the text of a message and removes its attachments.
+    pub async fn overwrite_message(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        content: &str,
+    ) -> Result<()> {
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let body = serde_json::json!({ "content": content, "attachments": [] });
+        self.send(Method::PATCH, &path, &[], Some(&body)).await?;
         Ok(())
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let response = self.send(Method::GET, path, query).await?;
+        let response = self.send(Method::GET, path, query, None).await?;
         let body = response.bytes().await?;
         Ok(serde_json::from_slice(&body)?)
     }
 
     /// Sends a request, waiting out rate limits and retrying transient errors.
-    async fn send(&self, method: Method, path: &str, query: &[(&str, String)]) -> Result<Response> {
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Response> {
         let url = format!("{}{}", self.inner.config.api_base, path);
         let max_retries = self.inner.config.max_retries;
         let (mut failures, mut index_waits, mut rate_limit_waits) = (0, 0, 0);
         loop {
             self.inner.limiter.ready().await;
-            let result = self
-                .inner
-                .http
-                .request(method.clone(), &url)
-                .query(query)
-                .send()
-                .await;
+            let mut request = self.inner.http.request(method.clone(), &url).query(query);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let result = request.send().await;
             let response = match result {
                 Ok(response) => response,
                 Err(err) if failures < max_retries && is_transient(&err) => {

@@ -485,3 +485,79 @@ async fn only_selected_channels_are_cleaned_up() {
         assert_eq!(fake.remaining(), vec![first.id]);
     }
 }
+
+#[tokio::test]
+async fn overwrites_before_deleting() {
+    let messages = vec![FakeMessage::in_dm(0, 0), FakeMessage::in_dm(1, 0)];
+    let ids: Vec<u64> = messages.iter().map(|m| m.id).collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+
+    for (text, random) in [("", true), ("deleted", false)] {
+        fake.state.lock().unwrap().edits.clear();
+        let options = JobOptions {
+            overwrite: Some(text.into()),
+            dry_run: false,
+            ..fast()
+        };
+        let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+        if random {
+            assert_eq!(summary.stats.deleted, 2);
+            let state = fake.state.lock().unwrap();
+            // Newest first: edit, then delete, message by message.
+            let expected: Vec<String> = ids
+                .iter()
+                .rev()
+                .flat_map(|id| [format!("PATCH {id}"), format!("DELETE {id}")])
+                .collect();
+            assert_eq!(state.log, expected);
+            for (_, body) in &state.edits {
+                assert!(!body["content"].as_str().unwrap().is_empty());
+                assert_eq!(body["attachments"], serde_json::json!([]));
+            }
+        } else {
+            // Everything is gone already; nothing to edit.
+            assert_eq!(summary.stats.deleted, 0);
+            assert!(fake.state.lock().unwrap().edits.is_empty());
+        }
+    }
+    assert!(fake.remaining().is_empty());
+}
+
+#[tokio::test]
+async fn stopping_during_a_delete_still_counts_it() {
+    let messages = (0..5).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let mut state = State::with_messages(messages);
+    state.delete_delay = Duration::from_millis(300);
+    let fake = FakeDiscord::start(state).await;
+    let control = JobControl::new();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let client = fake.client();
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            job::run(
+                &client,
+                Snowflake(ME),
+                &[dm_target()],
+                &Filter::default(),
+                &fast(),
+                &control,
+                tx,
+            )
+            .await
+        })
+    };
+
+    // The first delete has reached the server but not answered yet.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(fake.delete_calls(), 1);
+    control.cancel();
+    let summary = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(summary.cancelled);
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(fake.remaining().len(), 4);
+}

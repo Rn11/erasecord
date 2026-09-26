@@ -301,6 +301,22 @@
         <input type="checkbox" bind:checked={skipPinned} />
         <span>Keep pinned messages</span>
       </label>
+      <label class="choice">
+        <input
+          type="checkbox"
+          checked={options.overwrite !== null}
+          onchange={(event) => (options.overwrite = event.currentTarget.checked ? "" : null)}
+        />
+        <span>Overwrite messages before deleting them</span>
+      </label>
+      {#if options.overwrite !== null}
+        <div class="indent field">
+          <input type="text" placeholder="Random letters" bind:value={options.overwrite} aria-label="Replacement text" />
+          <span class="small muted">
+            Each message is edited to this text and loses its attachments, then deleted. Takes about twice as long.
+          </span>
+        </div>
+      {/if}
     </fieldset>
 
     <details>

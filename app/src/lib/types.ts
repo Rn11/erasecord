@@ -52,6 +52,8 @@ export interface JobOptions {
   search_delay_ms: number;
   max_rounds: number;
   dry_run: boolean;
+  /** Replace the text (empty: random letters) and remove attachments before deleting. */
+  overwrite: string | null;
 }
 
 export interface Stats {

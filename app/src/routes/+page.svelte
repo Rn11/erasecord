@@ -38,7 +38,7 @@
   let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
   let content = $state<ContentForm>(emptyContent());
   let skipPinned = $state(true);
-  let options = $state<JobOptions>({ delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, dry_run: false });
+  let options = $state<JobOptions>({ delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, dry_run: false, overwrite: null });
 
   // Fixed when counting starts, so the deletion uses exactly what was counted.
   let filter = $state<Filter>(toFilter({ mode: "all", amount: 1, unit: "days", from: "", to: "" }, true));

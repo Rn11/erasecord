@@ -87,6 +87,12 @@ pub struct State {
     /// Servers whose search answers 403 Missing Access.
     pub forbidden_guilds: Vec<u64>,
     pub deleted: Vec<u64>,
+    /// Every edit: message ID and the JSON body.
+    pub edits: Vec<(u64, Value)>,
+    /// Requests in the order they arrived, e.g. "PATCH 12" or "DELETE 12".
+    pub log: Vec<String>,
+    /// How long a delete takes to answer.
+    pub delete_delay: Duration,
     pub search_calls: usize,
     pub delete_calls: usize,
 }
@@ -124,6 +130,11 @@ impl FakeDiscord {
         Mock::given(method("DELETE"))
             .and(path_regex(r"^/api/v9/channels/\d+/messages/\d+$"))
             .respond_with(DeleteResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/api/v9/channels/\d+/messages/\d+$"))
+            .respond_with(EditResponder(state.clone()))
             .mount(&server)
             .await;
         FakeDiscord { server, state }
@@ -289,6 +300,8 @@ impl Respond for DeleteResponder {
         let segments: Vec<&str> = request.url.path().split('/').collect();
         let channel_id: u64 = segments[4].parse().unwrap();
         let message_id: u64 = segments[6].parse().unwrap();
+        state.log.push(format!("DELETE {message_id}"));
+        let delay = state.delete_delay;
 
         if let Some(&(status, code)) = state.delete_errors.get(&message_id) {
             return error_json(status, code, "refused");
@@ -305,6 +318,29 @@ impl Respond for DeleteResponder {
             state.stale.push(message);
         }
         state.deleted.push(message_id);
-        ResponseTemplate::new(204)
+        ResponseTemplate::new(204).set_delay(delay)
+    }
+}
+
+struct EditResponder(Arc<Mutex<State>>);
+
+impl Respond for EditResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let mut state = self.0.lock().unwrap();
+        let message_id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(6)
+            .unwrap()
+            .parse()
+            .unwrap();
+        state.log.push(format!("PATCH {message_id}"));
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        state.edits.push((message_id, body));
+        match state.messages.iter().find(|m| m.id == message_id) {
+            Some(m) => ResponseTemplate::new(200).set_body_json(message_json(m)),
+            None => error_json(404, 10008, "Unknown Message"),
+        }
     }
 }

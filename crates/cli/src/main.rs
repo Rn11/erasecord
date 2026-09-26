@@ -122,6 +122,10 @@ struct DeleteOptions {
     /// List what would be deleted without deleting anything.
     #[arg(long)]
     dry_run: bool,
+    /// Edit each message before deleting it: replace the text with TEXT (random letters if
+    /// left out) and remove attachments. Takes about twice as long.
+    #[arg(long, value_name = "TEXT", num_args = 0..=1, default_missing_value = "")]
+    overwrite: Option<String>,
     /// Do not ask for confirmation.
     #[arg(short, long)]
     yes: bool,
@@ -268,6 +272,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 delete_delay_ms: options.delete_delay,
                 search_delay_ms: options.search_delay,
                 dry_run: options.dry_run,
+                overwrite: options.overwrite.clone(),
                 ..Default::default()
             };
             if !options.dry_run && !options.yes {
@@ -686,6 +691,21 @@ mod tests {
             has: vec![],
             without: vec![],
         }
+    }
+
+    #[test]
+    fn overwrite_text_is_optional() {
+        let parse = |extra: &[&str]| {
+            let args = [&["purgecord", "delete", "--all-dms"][..], extra].concat();
+            match Cli::try_parse_from(args).unwrap().command {
+                Command::Delete { options, .. } => options.overwrite,
+                _ => panic!("expected delete"),
+            }
+        };
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["--overwrite"]), Some(String::new()));
+        assert_eq!(parse(&["--overwrite", "gone"]), Some("gone".into()));
+        assert_eq!(parse(&["--overwrite", "--dry-run"]), Some(String::new()));
     }
 
     #[test]

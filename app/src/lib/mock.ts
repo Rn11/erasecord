@@ -68,7 +68,7 @@ async function checkpoint(): Promise<boolean> {
   return !job.cancelled;
 }
 
-async function simulate(selected: Target[], filter: Filter, dryRun: boolean) {
+async function simulate(selected: Target[], filter: Filter, dryRun: boolean, overwrite: boolean) {
   const send = (event: JobEvent) => emit("job-event", event);
   const total: Stats = { deleted: 0, skipped: 0, failed: 0 };
   let cancelled = false;
@@ -82,7 +82,7 @@ async function simulate(selected: Target[], filter: Filter, dryRun: boolean) {
         cancelled = true;
         break;
       }
-      await sleep(dryRun ? 15 : 70);
+      await sleep(dryRun ? 15 : overwrite ? 140 : 70);
       const message_id = String(900_000 + i);
       if ((filter.pattern || filter.without.length) && i % 5 === 2) {
         stats.skipped++;
@@ -162,7 +162,7 @@ export function installMockBackend() {
         case "start_job":
           job.paused = false;
           job.cancelled = false;
-          void simulate(args.targets, args.filter, args.options.dry_run);
+          void simulate(args.targets, args.filter, args.options.dry_run, args.options.overwrite !== null);
           return null;
         case "pause_job":
           job.paused = true;

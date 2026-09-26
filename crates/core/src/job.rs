@@ -33,6 +33,10 @@ pub struct JobOptions {
     pub max_rounds: u32,
     /// Only report what would be deleted.
     pub dry_run: bool,
+    /// Before deleting a message, replace its text with this and remove its
+    /// attachments, so the original is gone even where Discord keeps deleted
+    /// messages around. An empty text means random letters.
+    pub overwrite: Option<String>,
 }
 
 impl Default for JobOptions {
@@ -42,6 +46,7 @@ impl Default for JobOptions {
             search_delay_ms: 2000,
             max_rounds: 3,
             dry_run: false,
+            overwrite: None,
         }
     }
 }
@@ -420,10 +425,30 @@ impl Job<'_> {
         }
 
         self.control.checkpoint().await?;
+        // From here on the requests are not abandoned when the job is stopped:
+        // Discord may already have carried them out, and the message must be
+        // counted. The job stops at the next checkpoint instead.
+        if let Some(text) = &self.options.overwrite {
+            let text = if text.trim().is_empty() {
+                random_text(message.id)
+            } else {
+                text.clone()
+            };
+            match self
+                .client
+                .overwrite_message(message.channel_id, message.id, &text)
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                // Deleting is what matters; it reports its own errors.
+                Err(err) => tracing::warn!(%err, "could not overwrite message {}", message.id),
+            }
+        }
         let result = self
-            .control
-            .guard(self.client.delete_message(message.channel_id, message.id))
-            .await?;
+            .client
+            .delete_message(message.channel_id, message.id)
+            .await;
         match delete::classify(result)? {
             Outcome::Deleted | Outcome::AlreadyGone => {
                 stats.deleted += 1;
@@ -465,6 +490,26 @@ impl Job<'_> {
     }
 }
 
+/// 8 to 24 random lowercase letters.
+fn random_text(seed: Snowflake) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0);
+    // xorshift64; the state must not be zero.
+    let mut state = (seed.0 ^ nanos.rotate_left(32)) | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let len = 8 + (next() % 17) as usize;
+    (0..len)
+        .map(|_| char::from(b'a' + (next() % 26) as u8))
+        .collect()
+}
+
 /// A one-line excerpt of a message for the progress log.
 fn preview_text(message: &Message) -> String {
     const MAX_CHARS: usize = 100;
@@ -481,5 +526,19 @@ fn preview_text(message: &Message) -> String {
         (true, 0) => "(no text)".to_owned(),
         (true, n) => format!("({n} attachment{})", if n == 1 { "" } else { "s" }),
         (false, _) => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_text_is_letters_of_varying_length() {
+        let texts: Vec<String> = (0..50).map(|i| random_text(Snowflake(i))).collect();
+        assert!(texts
+            .iter()
+            .all(|t| (8..=24).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase())));
+        assert!(texts.iter().any(|t| t.len() != texts[0].len()));
     }
 }
