@@ -1,6 +1,7 @@
 //! Command line front end for EraseCord.
 
 use std::io::{self, BufRead, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, Has, Notice,
-    Snowflake, Target, TargetKind,
+    Package, PackageTarget, Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -39,6 +40,9 @@ enum Command {
         /// Also list friends whose DM is closed, with their user IDs for --dm-with.
         #[arg(long)]
         friends: bool,
+        /// List what your Discord data package contains instead (no token needed).
+        #[arg(long, value_name = "PATH", conflicts_with = "friends")]
+        package: Option<PathBuf>,
     },
     /// List the channels of a server with their IDs, for --channel.
     Channels {
@@ -73,6 +77,11 @@ enum Command {
 
 #[derive(Args)]
 struct Selection {
+    /// Take the messages from your Discord data package (the .zip or its extracted folder)
+    /// instead of searching: reaches every message it lists, also in closed DMs. Counting
+    /// needs no token. IDs for --target and --channel: `erasecord list --package PATH`.
+    #[arg(long, value_name = "PATH")]
+    package: Option<PathBuf>,
     /// Server or DM channel ID to clean up; repeat for several. See `erasecord list`.
     #[arg(short, long = "target", value_name = "ID")]
     targets: Vec<Snowflake>,
@@ -168,6 +177,16 @@ fn build_filter(range: &Range, content: &Content, skip_pinned: bool) -> Result<F
 }
 
 impl Command {
+    fn package_path(&self) -> Option<&Path> {
+        match self {
+            Command::List { package, .. } => package.as_deref(),
+            Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
+                selection.package.as_deref()
+            }
+            Command::Channels { .. } => None,
+        }
+    }
+
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
@@ -192,7 +211,13 @@ impl Command {
         {
             bail!("choose what to clean up: --target <ID>, --channel <ID>, --dm-with <USER_ID>, --all-servers and/or --all-dms (see `erasecord list`)");
         }
-        build_filter(range, content, false)?;
+        let filter = build_filter(range, content, false)?;
+        if selection.package.is_some() {
+            if !selection.dm_with.is_empty() {
+                bail!("--dm-with does not work with --package; the package already contains closed DMs");
+            }
+            filter.compile_for_package()?;
+        }
         if needs_confirmation && !io::stdin().is_terminal() {
             bail!("refusing to delete without confirmation; pass --yes to skip it");
         }
@@ -213,21 +238,44 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<ExitCode> {
     cli.command.check()?;
-    let mut config = ClientConfig::default();
-    // For testing against a fake API server.
-    if let Ok(api_base) = std::env::var("ERASECORD_API_BASE") {
-        config.api_base = api_base;
-    }
-    let client = Client::with_config(&read_token()?, config)?;
-    let me = client.current_user().await.context("could not log in")?;
-    eprintln!("Logged in as {} ({})", me.display_name(), me.id);
+    let package = match cli.command.package_path() {
+        Some(path) => Some(Arc::new(load_package(path)?)),
+        None => None,
+    };
+    // Reading the package and counting in it needs no Discord account.
+    let offline =
+        package.is_some() && matches!(cli.command, Command::List { .. } | Command::Preview { .. });
+    let session = if offline {
+        None
+    } else {
+        let mut config = ClientConfig::default();
+        // For testing against a fake API server.
+        if let Ok(api_base) = std::env::var("ERASECORD_API_BASE") {
+            config.api_base = api_base;
+        }
+        let client = Client::with_config(&read_token()?, config)?;
+        let me = client.current_user().await.context("could not log in")?;
+        eprintln!("Logged in as {} ({})", me.display_name(), me.id);
+        Some((client, me.id))
+    };
+    let online = || session.clone().expect("logged in");
 
     let control = JobControl::new();
     let graceful = Arc::new(AtomicBool::new(false));
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
-        Command::List { json, friends } => {
+        Command::List { json, friends, .. } => {
+            if let Some(package) = &package {
+                let targets = package.targets();
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&targets)?);
+                } else {
+                    print_package_targets(&targets);
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (client, _) = online();
             let targets = list_targets(&client).await?;
             let friends = if friends {
                 Some(friends_without_dm(&client).await?)
@@ -255,6 +303,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Channels { server, json } => {
+            let (client, _) = online();
             let channels = list_channels(&client, server)
                 .await
                 .with_context(|| format!("could not list the channels of {server}"))?;
@@ -274,11 +323,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             range,
             content,
         } => {
-            let targets = select(&client, &selection).await?;
             let filter = build_filter(&range, &content, false)?;
+            if let Some(package) = &package {
+                let targets = select_from_package(package, &selection)?;
+                let me = session.as_ref().map_or(Snowflake(0), |(_, me)| *me);
+                print_package_preview(package, me, &targets, &filter)?;
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (client, me) = online();
+            let targets = select(&client, &selection).await?;
             preview(
                 &client,
-                me.id,
+                me,
                 &targets,
                 &filter,
                 &JobOptions::default(),
@@ -293,7 +349,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             content,
             options,
         } => {
-            let targets = select(&client, &selection).await?;
+            let (client, me) = online();
+            let targets = match &package {
+                Some(package) => select_from_package(package, &selection)?,
+                None => select(&client, &selection).await?,
+            };
             let filter = build_filter(&range, &content, options.skip_pinned)?;
             let job_options = JobOptions {
                 delete_delay_ms: options.delete_delay,
@@ -303,8 +363,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 ..Default::default()
             };
             if !options.dry_run && !options.yes {
-                let total =
-                    preview(&client, me.id, &targets, &filter, &job_options, &control).await?;
+                let total = match &package {
+                    Some(package) => print_package_preview(package, me, &targets, &filter)?,
+                    None => preview(&client, me, &targets, &filter, &job_options, &control).await?,
+                };
                 if total == 0 {
                     println!("Nothing to delete.");
                     return Ok(ExitCode::SUCCESS);
@@ -317,7 +379,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             graceful.store(true, Ordering::SeqCst);
             delete(
                 client,
-                me.id,
+                me,
+                package,
                 targets,
                 filter,
                 job_options,
@@ -327,6 +390,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             .await
         }
     }
+}
+
+fn load_package(path: &Path) -> Result<Package> {
+    eprintln!("Reading {}…", path.display());
+    let package = Package::open(path)?;
+    eprintln!(
+        "The data package lists {} messages in {} channels.",
+        package.message_count(),
+        package.channels.len()
+    );
+    Ok(package)
 }
 
 fn read_token() -> Result<String> {
@@ -460,6 +534,92 @@ fn target_label(target: &Target) -> String {
     }
 }
 
+/// The package's servers and DMs picked by `selection`.
+fn select_from_package(package: &Package, selection: &Selection) -> Result<Vec<Target>> {
+    let available = package.targets();
+    if let Some(unknown) = selection
+        .targets
+        .iter()
+        .find(|id| !available.iter().any(|t| t.target.id == **id))
+    {
+        bail!("{unknown} is not in the data package (see `erasecord list --package PATH`)");
+    }
+    let mut chosen: Vec<Target> = available
+        .iter()
+        .map(|t| &t.target)
+        .filter(|t| {
+            selection.targets.contains(&t.id)
+                || (selection.all_servers && t.kind == TargetKind::Guild)
+                || (selection.all_dms && t.kind != TargetKind::Guild)
+        })
+        .cloned()
+        .collect();
+    for &channel_id in &selection.channels {
+        let Some(owner) = available
+            .iter()
+            .find(|t| t.channels.iter().any(|c| c.id == channel_id))
+        else {
+            bail!("channel {channel_id} is not in the data package");
+        };
+        if owner.target.kind != TargetKind::Guild {
+            bail!("{channel_id} is a DM; choose it with --target");
+        }
+        let index = match chosen.iter().position(|t| t.id == owner.target.id) {
+            Some(index) => index,
+            None => {
+                chosen.push(owner.target.clone());
+                chosen.len() - 1
+            }
+        };
+        if !chosen[index].channels.contains(&channel_id) {
+            chosen[index].channels.push(channel_id);
+        }
+    }
+    Ok(chosen)
+}
+
+/// Prints the exact number of matching messages per target and returns the total.
+fn print_package_preview(
+    package: &Package,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+) -> Result<u64> {
+    let entries = job::preview_package(package, me, targets, filter)?;
+    for entry in &entries {
+        print_preview_entry(entry);
+    }
+    let total = entries.iter().filter_map(|e| e.count).sum();
+    println!("{:>8}  total", total);
+    if filter.skip_pinned {
+        println!("          (pinned messages are included in the counts but will be kept)");
+    }
+    Ok(total)
+}
+
+fn print_package_targets(targets: &[PackageTarget]) {
+    println!("{:<9} {:<20} {:>9}  NAME", "KIND", "ID", "MESSAGES");
+    for item in targets {
+        let kind = match item.target.kind {
+            TargetKind::Guild => "server",
+            TargetKind::Dm => "dm",
+            TargetKind::GroupDm => "group-dm",
+        };
+        println!(
+            "{kind:<9} {:<20} {:>9}  {}",
+            item.target.id, item.messages, item.target.name
+        );
+        if item.target.kind == TargetKind::Guild && item.channels.len() > 1 {
+            for channel in &item.channels {
+                println!(
+                    "{:<9} {:<20} {:>9}  #{}",
+                    "  channel", channel.id, channel.messages, channel.name
+                );
+            }
+        }
+    }
+}
+
 fn confirm(total: u64) -> Result<bool> {
     print!("Permanently delete up to {total} messages? Type 'delete' to continue: ");
     io::stdout().flush()?;
@@ -468,9 +628,11 @@ fn confirm(total: u64) -> Result<bool> {
     Ok(answer.trim().eq_ignore_ascii_case("delete"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn delete(
     client: Client,
     me: Snowflake,
+    package: Option<Arc<Package>>,
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
@@ -481,7 +643,15 @@ async fn delete(
     let dry_run = options.dry_run;
     let target_count = targets.len();
     let task = tokio::spawn(async move {
-        job::run(&client, me, &targets, &filter, &options, &control, tx).await
+        match package {
+            Some(package) => {
+                job::run_package(
+                    &client, me, &package, &targets, &filter, &options, &control, tx,
+                )
+                .await
+            }
+            None => job::run(&client, me, &targets, &filter, &options, &control, tx).await,
+        }
     });
 
     let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);

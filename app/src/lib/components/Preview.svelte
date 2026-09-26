@@ -7,6 +7,7 @@
     targets,
     entries,
     counting,
+    exact = false,
     error,
     filter,
     onBack,
@@ -16,6 +17,8 @@
     targets: Target[];
     entries: PreviewEntry[];
     counting: boolean;
+    /** Counts come from the data package: exact, no search involved. */
+    exact?: boolean;
     error: string | null;
     filter: Filter;
     onBack: () => void;
@@ -37,7 +40,8 @@
       .join(" and "),
   );
   const failures = $derived(entries.filter((e) => e.error).length);
-  const upTo = $derived(checksLocally(filter) || filter.skip_pinned ? "up to " : "");
+  const approximate = $derived(!exact && checksLocally(filter));
+  const upTo = $derived(approximate || filter.skip_pinned ? "up to " : "");
 
   function confirmDelete() {
     dialog?.close();
@@ -92,7 +96,13 @@
   {#if !counting && filter.skip_pinned && total > 0}
     <p class="small muted">Pinned messages are included in these numbers and will be kept.</p>
   {/if}
-  {#if !counting && checksLocally(filter) && total > 0}
+  {#if !counting && exact && total > 0}
+    <p class="small muted">
+      Counted from your data package. Messages deleted since you requested it are included and are counted as deleted
+      when EraseCord gets to them.
+    </p>
+  {/if}
+  {#if !counting && approximate && total > 0}
     <p class="small muted">
       The regular expression and “keep messages with” are checked while deleting, so fewer messages may be deleted than
       counted here. A dry run shows exactly which ones.

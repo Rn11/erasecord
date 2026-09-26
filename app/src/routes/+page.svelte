@@ -2,6 +2,7 @@
   import { onDestroy, onMount } from "svelte";
   import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { isTauri } from "@tauri-apps/api/core";
+  import { open } from "@tauri-apps/plugin-dialog";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
   import {
@@ -14,7 +15,16 @@
     type RangeForm,
   } from "$lib/format";
   import { applyEvent, newRun, type RunState } from "$lib/run";
-  import type { Filter, Friend, GuildChannel, JobOptions, PreviewEntry, Target, User } from "$lib/types";
+  import type {
+    Filter,
+    Friend,
+    GuildChannel,
+    JobOptions,
+    PackageSummary,
+    PreviewEntry,
+    Target,
+    User,
+  } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
   import Login from "$lib/components/Login.svelte";
   import Preview from "$lib/components/Preview.svelte";
@@ -35,6 +45,10 @@
   const channelPicks = new SvelteMap<string, string[]>();
   /** Server ID → its channels, once loaded. */
   const channelLists = new SvelteMap<string, { loading: boolean; error: string | null; channels: GuildChannel[] }>();
+  /** The imported data package; while set, its servers and DMs replace the live ones. */
+  let pkg = $state<PackageSummary | null>(null);
+  let importing = $state(false);
+  let importError = $state<string | null>(null);
   /** Friends without an open DM; null until asked for. */
   let friends = $state<Friend[] | null>(null);
   let friendsLoading = $state(false);
@@ -54,8 +68,9 @@
 
   let run = $state<RunState | null>(null);
 
+  const shownTargets = $derived(pkg ? pkg.targets.map((t) => t.target) : targets);
   const selectedTargets = $derived(
-    targets.filter((t) => selected.has(t.id)).map((t) => ({ ...t, channels: channelPicks.get(t.id) ?? [] })),
+    shownTargets.filter((t) => selected.has(t.id)).map((t) => ({ ...t, channels: channelPicks.get(t.id) ?? [] })),
   );
   const busy = $derived(counting || (run !== null && run.summary === null));
 
@@ -168,14 +183,62 @@
     }
   }
 
+  function clearSelection() {
+    selected.clear();
+    channelPicks.clear();
+    channelLists.clear();
+  }
+
+  async function importPackage(folder: boolean) {
+    importError = null;
+    let path: string | null;
+    try {
+      path = await open({
+        title: folder ? "Choose the extracted data package folder" : "Choose your Discord data package",
+        directory: folder,
+        multiple: false,
+        filters: folder ? undefined : [{ name: "Discord data package", extensions: ["zip"] }],
+      });
+    } catch (err) {
+      importError = asCommandError(err).message;
+      return;
+    }
+    if (!path) return;
+    importing = true;
+    try {
+      const summary = await api.importPackage(path);
+      clearSelection();
+      // The package knows each server's channels already.
+      for (const item of summary.targets) {
+        if (item.target.kind !== "guild") continue;
+        const channels = item.channels.map((c) => ({ id: c.id, name: c.name, kind: 0, category: null, messages: c.messages }));
+        channelLists.set(item.target.id, { loading: false, error: null, channels });
+      }
+      // The package cannot tell embeds and stickers apart.
+      const known = (h: string) => h !== "embed" && h !== "sticker";
+      content.has = content.has.filter(known);
+      content.without = content.without.filter(known);
+      pkg = summary;
+    } catch (err) {
+      importError = fail(err);
+    } finally {
+      importing = false;
+    }
+  }
+
+  async function closePackage() {
+    await api.closePackage();
+    pkg = null;
+    clearSelection();
+  }
+
   async function logout() {
     await api.logout();
     user = null;
     targets = [];
-    selected.clear();
-    channelPicks.clear();
-    channelLists.clear();
+    clearSelection();
     friends = null;
+    pkg = null;
     run = null;
     notice = null;
     screen = "login";
@@ -190,11 +253,9 @@
     counting = true;
     screen = "preview";
     try {
-      entries = await api.preview(
-        $state.snapshot(previewTargets),
-        $state.snapshot(filter),
-        $state.snapshot(options),
-      );
+      entries = pkg
+        ? await api.previewPackage($state.snapshot(previewTargets), $state.snapshot(filter))
+        : await api.preview($state.snapshot(previewTargets), $state.snapshot(filter), $state.snapshot(options));
     } catch (err) {
       if (asCommandError(err).kind === "cancelled") screen = "setup";
       else previewError = fail(err);
@@ -210,10 +271,9 @@
     run = newRun($state.snapshot(runTargets), expected, dryRun);
     screen = "progress";
     try {
-      await api.startJob($state.snapshot(runTargets), $state.snapshot(filter), {
-        ...$state.snapshot(options),
-        dry_run: dryRun,
-      });
+      const jobOptions = { ...$state.snapshot(options), dry_run: dryRun };
+      if (pkg) await api.startPackageJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions);
+      else await api.startJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions);
     } catch (err) {
       const message = fail(err);
       if (message && run) {
@@ -274,7 +334,12 @@
       <Login {notice} onLogin={enter} />
     {:else if screen === "setup"}
       <Setup
-        {targets}
+        targets={shownTargets}
+        {pkg}
+        {importing}
+        {importError}
+        onImport={importPackage}
+        onClosePackage={closePackage}
         loading={targetsLoading}
         error={targetsError}
         {selected}
@@ -299,6 +364,7 @@
         targets={previewTargets}
         {entries}
         {counting}
+        exact={pkg !== null}
         error={previewError}
         {filter}
         onBack={() => (screen = "setup")}

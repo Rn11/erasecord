@@ -10,11 +10,16 @@
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
-  import type { Friend, GuildChannel, Has, JobOptions, Target } from "$lib/types";
+  import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
   let {
     targets,
+    pkg,
+    importing,
+    importError,
+    onImport,
+    onClosePackage,
     loading,
     error,
     selected,
@@ -35,6 +40,11 @@
     onCount,
   }: {
     targets: Target[];
+    pkg: PackageSummary | null;
+    importing: boolean;
+    importError: string | null;
+    onImport: (folder: boolean) => void;
+    onClosePackage: () => void;
     loading: boolean;
     error: string | null;
     selected: SvelteSet<string>;
@@ -81,6 +91,10 @@
   }
 
   const expanded = new SvelteSet<string>();
+  const packageCounts = $derived(new Map((pkg?.targets ?? []).map((t) => [t.target.id, t.messages])));
+  const left = $derived(new Set(pkg?.left_servers ?? []));
+  // The data package cannot tell embeds and stickers apart.
+  const kinds = $derived(pkg ? HAS_KINDS.filter((k) => k.value !== "embed" && k.value !== "sticker") : HAS_KINDS);
 
   function toggle(id: string) {
     if (selected.has(id)) {
@@ -130,6 +144,21 @@
 
 <div class="setup">
   <section class="card picker" aria-label="Servers and direct messages">
+    <div class="source small" class:package={pkg}>
+      {#if pkg}
+        <span><strong>Data package</strong> · {plural(pkg.messages, "message")} in {plural(pkg.targets.length, "place")}</span>
+        <button class="link" onclick={onClosePackage}>Back to live search</button>
+      {:else if importing}
+        <span class="muted"><span class="spinner"></span> Reading the data package…</span>
+      {:else}
+        <span class="muted">Searching your servers and open DMs.</span>
+        <span class="import">
+          <button class="link" onclick={() => onImport(false)}>Import data package…</button>
+          <button class="link muted" onclick={() => onImport(true)} title="Pick the extracted folder instead of the .zip file">(folder)</button>
+        </span>
+      {/if}
+    </div>
+    {#if importError}<p class="small problem source-error">{importError}</p>{/if}
     <div class="tabs" role="tablist">
       <button role="tab" aria-selected={tab === "servers"} class:active={tab === "servers"} onclick={() => (tab = "servers")}>
         Servers <span class="count">{selectedServers ? `${selectedServers}/` : ""}{servers.length}</span>
@@ -144,7 +173,9 @@
       <button class="btn small" onclick={toggleVisible} disabled={visible.length === 0}>
         {allVisibleSelected ? "Select none" : "Select all"}
       </button>
-      <button class="btn small ghost" onclick={onReload} disabled={loading} title="Reload list">↻</button>
+      {#if !pkg}
+        <button class="btn small ghost" onclick={onReload} disabled={loading} title="Reload list">↻</button>
+      {/if}
     </div>
 
     <div class="list">
@@ -165,6 +196,8 @@
             <Avatar name={target.name} url={target.icon_url} size={28} />
             <span class="name">{target.name}</span>
             {#if target.kind === "group_dm"}<span class="tag">group</span>{/if}
+            {#if left.has(target.id)}<span class="tag warn" title="You are no longer a member; deleting will likely fail">left</span>{/if}
+            {#if pkg}<span class="muted small num">{(packageCounts.get(target.id) ?? 0).toLocaleString()}</span>{/if}
             {#if picks.length}<span class="tag picked">{plural(picks.length, "channel")}</span>{/if}
             {#if target.kind === "guild"}
               <button
@@ -205,17 +238,22 @@
                       />
                       <span class="icon muted" aria-hidden="true">{channelIcon(channel.kind)}</span>
                       <span class="name">{channel.name}</span>
+                      {#if channel.messages !== undefined}<span class="muted small num">{channel.messages.toLocaleString()}</span>{/if}
                     </label>
                   {/each}
                 {/each}
-                <p class="small muted">Threads and forum posts are only included when the whole server is selected.</p>
+                {#if !pkg}
+                  <p class="small muted">Threads and forum posts are only included when the whole server is selected.</p>
+                {/if}
               {/if}
             </div>
           {/if}
         {/each}
       {/if}
     </div>
-    {#if tab === "dms"}
+    {#if tab === "dms" && pkg}
+      <p class="closed small muted">The data package includes closed DMs too.</p>
+    {:else if tab === "dms"}
       <div class="closed">
         {#if friends === null}
           <p class="small muted">Only open DMs are listed.</p>
@@ -308,7 +346,7 @@
       <div class="field">
         <span class="small muted">Only messages with</span>
         <div class="chips" role="group" aria-label="Only messages with">
-          {#each HAS_KINDS as kind (kind.value)}
+          {#each kinds as kind (kind.value)}
             <label class="chip" class:on={content.has.includes(kind.value)}>
               <input type="checkbox" checked={content.has.includes(kind.value)} onchange={() => toggleKind("has", kind.value)} />
               {kind.label}
@@ -319,7 +357,7 @@
       <div class="field">
         <span class="small muted">Keep messages with</span>
         <div class="chips" role="group" aria-label="Keep messages with">
-          {#each HAS_KINDS as kind (kind.value)}
+          {#each kinds as kind (kind.value)}
             <label class="chip keep" class:on={content.without.includes(kind.value)}>
               <input
                 type="checkbox"
@@ -590,6 +628,37 @@
 
   p.empty {
     flex-direction: row;
+  }
+
+  .source {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+
+  .source.package {
+    background: var(--accent-soft);
+  }
+
+  .source > span {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .source-error {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .tag.warn {
+    color: var(--warn);
+    border-color: var(--warn);
   }
 
   .closed {

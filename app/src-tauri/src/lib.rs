@@ -5,6 +5,7 @@ mod state;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::login,
@@ -16,6 +17,10 @@ pub fn run() {
             commands::open_dm,
             commands::preview,
             commands::start_job,
+            commands::start_package_job,
+            commands::import_package,
+            commands::close_package,
+            commands::preview_package,
             commands::pause_job,
             commands::resume_job,
             commands::cancel_job,

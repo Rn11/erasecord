@@ -1,8 +1,14 @@
 //! Commands the web frontend calls through `invoke`. All Discord traffic runs
 //! here in Rust, so the token never reaches the web view after login.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
-use erasecord_core::{Client, ClientConfig, Error, Friend, GuildChannel, Snowflake, Target, User};
+use erasecord_core::{
+    Client, ClientConfig, Error, Friend, GuildChannel, Package, PackageTarget, Snowflake, Target,
+    TargetKind, User,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -27,6 +33,7 @@ enum ErrorKind {
     Cancelled,
     Busy,
     NotLoggedIn,
+    NoPackage,
     Other,
 }
 
@@ -35,6 +42,13 @@ impl CommandError {
         CommandError {
             kind: ErrorKind::NotLoggedIn,
             message: "not logged in".into(),
+        }
+    }
+
+    fn no_package() -> Self {
+        CommandError {
+            kind: ErrorKind::NoPackage,
+            message: "no data package is open".into(),
         }
     }
 
@@ -133,6 +147,7 @@ pub async fn logout(state: State<'_, AppState>) -> CommandResult<()> {
         job.cancel();
     }
     state.set_session(None);
+    state.set_package(None);
     token_store::forget().await;
     Ok(())
 }
@@ -199,19 +214,46 @@ pub async fn start_job(
     filter: Filter,
     options: JobOptions,
 ) -> CommandResult<()> {
+    spawn_job(app, &state, None, targets, filter, options)
+}
+
+/// Like [`start_job`], with the messages of the imported data package.
+#[tauri::command]
+pub async fn start_package_job(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    targets: Vec<Target>,
+    filter: Filter,
+    options: JobOptions,
+) -> CommandResult<()> {
+    let package = state.package().ok_or_else(CommandError::no_package)?;
+    spawn_job(app, &state, Some(package), targets, filter, options)
+}
+
+fn spawn_job(
+    app: AppHandle,
+    state: &AppState,
+    package: Option<Arc<Package>>,
+    targets: Vec<Target>,
+    filter: Filter,
+    options: JobOptions,
+) -> CommandResult<()> {
     let session = state.session()?;
     let control = state.begin_job()?;
     tauri::async_runtime::spawn(async move {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let run = job::run(
-            &session.client,
-            session.me.id,
-            &targets,
-            &filter,
-            &options,
-            &control,
-            tx,
-        );
+        let (client, me) = (&session.client, session.me.id);
+        let run = async {
+            match &package {
+                Some(package) => {
+                    job::run_package(
+                        client, me, package, &targets, &filter, &options, &control, tx,
+                    )
+                    .await
+                }
+                None => job::run(client, me, &targets, &filter, &options, &control, tx).await,
+            }
+        };
         let forward = async {
             while let Some(event) = rx.recv().await {
                 if matches!(event, Event::Finished(_)) {
@@ -225,6 +267,69 @@ pub async fn start_job(
         tokio::join!(run, forward);
     });
     Ok(())
+}
+
+#[derive(Serialize)]
+pub struct PackageSummary {
+    targets: Vec<PackageTarget>,
+    messages: u64,
+    /// Servers in the package that the user is no longer a member of.
+    left_servers: Vec<Snowflake>,
+}
+
+/// Reads a data package (a .zip file or an extracted folder) and keeps it
+/// for [`preview_package`] and [`start_package_job`].
+#[tauri::command]
+pub async fn import_package(
+    state: State<'_, AppState>,
+    path: PathBuf,
+) -> CommandResult<PackageSummary> {
+    let session = state.session()?;
+    let package = tauri::async_runtime::spawn_blocking(move || Package::open(&path))
+        .await
+        .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
+    let targets = package.targets();
+    let member_of: Vec<Snowflake> = session
+        .client
+        .guilds()
+        .await?
+        .into_iter()
+        .map(|g| g.id)
+        .collect();
+    let left_servers = targets
+        .iter()
+        .filter(|t| t.target.kind == TargetKind::Guild && !member_of.contains(&t.target.id))
+        .map(|t| t.target.id)
+        .collect();
+    let summary = PackageSummary {
+        messages: package.message_count(),
+        targets,
+        left_servers,
+    };
+    state.set_package(Some(Arc::new(package)));
+    Ok(summary)
+}
+
+#[tauri::command]
+pub fn close_package(state: State<'_, AppState>) {
+    state.set_package(None);
+}
+
+/// Exact counts from the imported package; needs no network.
+#[tauri::command]
+pub async fn preview_package(
+    state: State<'_, AppState>,
+    targets: Vec<Target>,
+    filter: Filter,
+) -> CommandResult<Vec<PreviewEntry>> {
+    let session = state.session()?;
+    let package = state.package().ok_or_else(CommandError::no_package)?;
+    Ok(job::preview_package(
+        &package,
+        session.me.id,
+        &targets,
+        &filter,
+    )?)
 }
 
 #[tauri::command]

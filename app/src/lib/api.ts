@@ -10,6 +10,7 @@ import type {
   JobEvent,
   JobOptions,
   LoginResult,
+  PackageSummary,
   PreviewEntry,
   Target,
   User,
@@ -27,6 +28,12 @@ export const api = {
     invoke<PreviewEntry[]>("preview", { targets, filter, options }),
   startJob: (targets: Target[], filter: Filter, options: JobOptions) =>
     invoke<void>("start_job", { targets, filter, options }),
+  importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
+  closePackage: () => invoke<void>("close_package"),
+  previewPackage: (targets: Target[], filter: Filter) =>
+    invoke<PreviewEntry[]>("preview_package", { targets, filter }),
+  startPackageJob: (targets: Target[], filter: Filter, options: JobOptions) =>
+    invoke<void>("start_package_job", { targets, filter, options }),
   pauseJob: () => invoke<void>("pause_job"),
   resumeJob: () => invoke<void>("resume_job"),
   cancelJob: () => invoke<void>("cancel_job"),

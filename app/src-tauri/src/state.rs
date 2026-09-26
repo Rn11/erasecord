@@ -1,9 +1,9 @@
 //! What the app keeps between commands: the logged-in session, the running
 //! job, and the remembered token.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
-use erasecord_core::{Client, JobControl, User};
+use erasecord_core::{Client, JobControl, Package, User};
 
 use crate::commands::CommandError;
 
@@ -18,6 +18,9 @@ pub struct AppState {
     session: Mutex<Option<Session>>,
     /// The running preview or clean-up; only one runs at a time.
     job: Mutex<Option<JobControl>>,
+    /// The imported data package, if any. Kept here: it is too big to send
+    /// to the web view.
+    package: Mutex<Option<Arc<Package>>>,
 }
 
 impl AppState {
@@ -49,6 +52,14 @@ impl AppState {
 
     pub fn job(&self) -> Option<JobControl> {
         self.job.lock().unwrap().clone()
+    }
+
+    pub fn package(&self) -> Option<Arc<Package>> {
+        self.package.lock().unwrap().clone()
+    }
+
+    pub fn set_package(&self, package: Option<Arc<Package>>) {
+        *self.package.lock().unwrap() = package;
     }
 }
 

@@ -4,7 +4,17 @@
 
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Filter, Friend, GuildChannel, JobEvent, PreviewEntry, Stats, Target, User } from "./types";
+import type {
+  Filter,
+  Friend,
+  GuildChannel,
+  JobEvent,
+  PackageSummary,
+  PreviewEntry,
+  Stats,
+  Target,
+  User,
+} from "./types";
 
 const me: User = { id: "1000", username: "demo", global_name: "Demo User", avatar: null };
 
@@ -27,6 +37,31 @@ const friends: Friend[] = [
   { user_id: "5002", name: "Frank", icon_url: null },
   { user_id: "5003", name: "Grace", icon_url: null },
 ];
+
+function fakePackage(): PackageSummary {
+  const target = (kind: Target["kind"], id: string, name: string): Target => ({ kind, id, name, icon_url: null, channels: [] });
+  const year = 365 * 86_400_000;
+  const dates = { first_message: new Date(Date.now() - 4 * year).toISOString(), last_message: new Date().toISOString() };
+  return {
+    messages: 2451,
+    left_servers: ["3099"],
+    targets: [
+      { target: target("guild", "3099", "Server I left"), messages: 310, channels: [{ id: "30991", name: "general", messages: 310 }], ...dates },
+      {
+        target: target("guild", "3001", "Rust Enjoyers"),
+        messages: 1204,
+        channels: [
+          { id: "30012", name: "general", messages: 900 },
+          { id: "30013", name: "memes", messages: 250 },
+          { id: "30017", name: "old-channel", messages: 54 },
+        ],
+        ...dates,
+      },
+      { target: target("dm", "4001", "Alice"), messages: 512, channels: [{ id: "4001", name: "Alice", messages: 512 }], ...dates },
+      { target: target("dm", "4009", "Old friend"), messages: 425, channels: [{ id: "4009", name: "Old friend", messages: 425 }], ...dates },
+    ],
+  };
+}
 
 function channelsOf(guildId: string): GuildChannel[] {
   const make = (n: number, name: string, category: string | null, kind = 0): GuildChannel => ({
@@ -176,6 +211,23 @@ export function installMockBackend() {
           }
           return entries;
         }
+        case "plugin:dialog|open":
+          return "/home/demo/Downloads/package.zip";
+        case "import_package":
+          await sleep(800);
+          return fakePackage();
+        case "close_package":
+          return null;
+        case "preview_package":
+          return (args.targets as Target[]).map((target) => {
+            const item = fakePackage().targets.find((t) => t.target.id === target.id);
+            const channels = item?.channels.filter((c) => !target.channels.length || target.channels.includes(c.id)) ?? [];
+            let count = channels.reduce((sum, c) => sum + c.messages, 0);
+            if (args.filter.after || args.filter.before) count = Math.round(count * 0.4);
+            if (args.filter.content || args.filter.has.length) count = Math.round(count * 0.15);
+            return { target, count, error: null };
+          });
+        case "start_package_job":
         case "start_job":
           job.paused = false;
           job.cancelled = false;

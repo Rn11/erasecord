@@ -34,6 +34,30 @@ export interface GuildChannel {
   /** Discord channel type: 0 text, 2 voice, 5 announcement, 13 stage. */
   kind: number;
   category: string | null;
+  /** Only for channels from a data package: how many of your messages it holds. */
+  messages?: number;
+}
+
+export interface PackageChannelInfo {
+  id: Snowflake;
+  name: string;
+  messages: number;
+}
+
+/** A server or DM in the imported data package. */
+export interface PackageTarget {
+  target: Target;
+  messages: number;
+  channels: PackageChannelInfo[];
+  first_message: string | null;
+  last_message: string | null;
+}
+
+export interface PackageSummary {
+  targets: PackageTarget[];
+  messages: number;
+  /** Servers in the package that you are no longer a member of. */
+  left_servers: Snowflake[];
 }
 
 export type Has = "link" | "file" | "image" | "video" | "sound" | "embed" | "sticker";
@@ -108,11 +132,12 @@ export type JobEvent =
   | { type: "skipped"; target_id: Snowflake; message_id: Snowflake; reason: SkipReason }
   | { type: "failed"; target_id: Snowflake; message_id: Snowflake; error: string }
   | { type: "target_failed"; target_id: Snowflake; error: string }
+  | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
   | { type: "target_finished"; target_id: Snowflake; stats: Stats }
   | { type: "notice"; notice: Notice }
   | ({ type: "finished" } & Summary);
 
 export interface CommandError {
-  kind: "unauthorized" | "cancelled" | "busy" | "not_logged_in" | "other";
+  kind: "unauthorized" | "cancelled" | "busy" | "not_logged_in" | "no_package" | "other";
   message: string;
 }
