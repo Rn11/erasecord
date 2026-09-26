@@ -1,4 +1,4 @@
-import type { Filter, Has, Notice, SkipReason, User } from "./types";
+import type { Filter, Has, Notice, SkipReason, Target, User } from "./types";
 
 export type RangeMode = "all" | "older_than" | "between";
 export type AgeUnit = "days" | "weeks" | "months" | "years";
@@ -188,4 +188,9 @@ export function displayName(user: User): string {
 
 export function plural(count: number, word: string): string {
   return `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
+}
+
+/** A target's name, with the number of channels if only some are selected. */
+export function targetLabel(target: Target): string {
+  return target.channels.length ? `${target.name} · ${plural(target.channels.length, "channel")}` : target.name;
 }

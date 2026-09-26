@@ -4,7 +4,7 @@
 
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
-import type { Filter, JobEvent, PreviewEntry, Stats, Target, User } from "./types";
+import type { Filter, GuildChannel, JobEvent, PreviewEntry, Stats, Target, User } from "./types";
 
 const me: User = { id: "1000", username: "demo", global_name: "Demo User", avatar: null };
 
@@ -20,7 +20,24 @@ const targets: Target[] = [
   ["dm", "4002", "Bob"],
   ["group_dm", "4003", "Alice, Bob, Charlie"],
   ["dm", "4004", "Dana"],
-].map(([kind, id, name]) => ({ kind, id, name, icon_url: null }) as Target);
+].map(([kind, id, name]) => ({ kind, id, name, icon_url: null, channels: [] }) as Target);
+
+function channelsOf(guildId: string): GuildChannel[] {
+  const make = (n: number, name: string, category: string | null, kind = 0): GuildChannel => ({
+    id: `${guildId}${n}`,
+    name,
+    kind,
+    category,
+  });
+  return [
+    make(1, "rules", null),
+    make(2, "general", "Text channels"),
+    make(3, "memes", "Text channels"),
+    make(4, "off-topic", "Text channels"),
+    make(5, "announcements", "Info", 5),
+    make(6, "Lounge", "Voice channels", 2),
+  ];
+}
 
 const samples = [
   "haha yes",
@@ -39,6 +56,7 @@ function countFor(target: Target, filter: Filter): number {
   let count = ((Number(target.id) * 37) % 160) + 8;
   if (filter.after || filter.before) count = Math.round(count * 0.4);
   if (filter.content || filter.has.length) count = Math.round(count * 0.15);
+  if (target.channels.length) count = Math.round((count * target.channels.length) / 6);
   return count;
 }
 
@@ -122,6 +140,10 @@ export function installMockBackend() {
         case "list_targets":
           await sleep(300);
           return targets;
+        case "list_channels":
+          await sleep(300);
+          if (args.guildId === "3005") throw { kind: "other", message: "Discord answered 403: Missing Access" };
+          return channelsOf(args.guildId);
         case "preview": {
           job.cancelled = false;
           const entries: PreviewEntry[] = [];

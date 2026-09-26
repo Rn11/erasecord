@@ -127,6 +127,7 @@ impl Filter {
             max_id: self.before.map(Snowflake::from_datetime),
             content: (!words.is_empty()).then(|| words.join(" ")),
             has: self.has.clone(),
+            channel_ids: Vec::new(),
         }
     }
 

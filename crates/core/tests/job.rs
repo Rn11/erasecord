@@ -462,3 +462,26 @@ async fn invalid_pattern_stops_before_any_request() {
     assert_eq!(events.len(), 1);
     assert_eq!(fake.state.lock().unwrap().search_calls, 0);
 }
+
+#[tokio::test]
+async fn only_selected_channels_are_cleaned_up() {
+    for ignore_channel_filter in [false, true] {
+        let first = FakeMessage::in_guild(0, 0, ME);
+        let second = FakeMessage {
+            channel_id: GUILD_CHANNEL_2,
+            ..FakeMessage::in_guild(1, 0, ME)
+        };
+        let mut state = State::with_messages(vec![first.clone(), second.clone()]);
+        state.ignore_channel_filter = ignore_channel_filter;
+        let fake = FakeDiscord::start(state).await;
+        let target = Target {
+            channels: vec![Snowflake(GUILD_CHANNEL_2)],
+            ..guild_target()
+        };
+
+        let (summary, _) = run_job(&fake, &[target], Filter::default(), fast()).await;
+
+        assert_eq!(summary.stats.deleted, 1, "ignore: {ignore_channel_filter}");
+        assert_eq!(fake.remaining(), vec![first.id]);
+    }
+}

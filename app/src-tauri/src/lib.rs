@@ -11,6 +11,7 @@ pub fn run() {
             commands::restore_session,
             commands::logout,
             commands::list_targets,
+            commands::list_channels,
             commands::preview,
             commands::start_job,
             commands::pause_job,

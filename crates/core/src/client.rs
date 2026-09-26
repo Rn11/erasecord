@@ -159,6 +159,15 @@ impl Client {
         self.get("/users/@me/channels", &[]).await
     }
 
+    /// The channels of a server that the user can see.
+    pub async fn guild_channels(&self, guild_id: Snowflake) -> Result<Vec<Channel>> {
+        self.get(&format!("/guilds/{guild_id}/channels"), &[]).await
+    }
+
+    pub async fn channel(&self, channel_id: Snowflake) -> Result<Channel> {
+        self.get(&format!("/channels/{channel_id}"), &[]).await
+    }
+
     pub async fn search(&self, scope: Scope, query: &SearchQuery) -> Result<SearchResponse> {
         self.get(&scope.search_path(), &query.params()).await
     }

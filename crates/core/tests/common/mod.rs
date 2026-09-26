@@ -17,6 +17,7 @@ pub const ME: u64 = 1000;
 pub const OTHER: u64 = 2000;
 pub const GUILD: u64 = 10;
 pub const GUILD_CHANNEL: u64 = 11;
+pub const GUILD_CHANNEL_2: u64 = 12;
 pub const DM_CHANNEL: u64 = 20;
 pub const TOKEN: &str = "test-token";
 
@@ -81,6 +82,8 @@ pub struct State {
     stale: Vec<FakeMessage>,
     /// Message ID -> (HTTP status, Discord error code) returned on delete.
     pub delete_errors: HashMap<u64, (u16, u64)>,
+    /// Search ignores `channel_id`, like a misbehaving index.
+    pub ignore_channel_filter: bool,
     /// Servers whose search answers 403 Missing Access.
     pub forbidden_guilds: Vec<u64>,
     pub deleted: Vec<u64>,
@@ -164,6 +167,7 @@ pub fn guild_target() -> Target {
         id: Snowflake(GUILD),
         name: "Test server".into(),
         icon_url: None,
+        channels: Vec::new(),
     }
 }
 
@@ -173,6 +177,7 @@ pub fn dm_target() -> Target {
         id: Snowflake(DM_CHANNEL),
         name: "Friend".into(),
         icon_url: None,
+        channels: Vec::new(),
     }
 }
 
@@ -223,6 +228,12 @@ impl Respond for SearchResponder {
         let query: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
         let id_param = |name: &str| query.get(name).map(|v| v.parse::<u64>().unwrap());
         let content = query.get("content").map(|c| c.to_lowercase());
+        let channels: Vec<u64> = request
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "channel_id" && !state.ignore_channel_filter)
+            .map(|(_, v)| v.parse().unwrap())
+            .collect();
         let has: Vec<String> = request
             .url
             .query_pairs()
@@ -245,6 +256,7 @@ impl Respond for SearchResponder {
                 _ => m.channel_id == scope_id,
             })
             .filter(|m| author.is_none_or(|a| m.author_id == a))
+            .filter(|m| channels.is_empty() || channels.contains(&m.channel_id))
             .filter(|m| min.is_none_or(|min| m.id > min) && max.is_none_or(|max| m.id < max))
             // Like Discord's search: word-based and fuzzy, so looser than purgecord.
             .filter(|m| {

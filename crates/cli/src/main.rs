@@ -10,7 +10,7 @@ use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use purgecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use purgecord_core::{
-    list_targets, Client, ClientConfig, Has, Notice, Snowflake, Target, TargetKind,
+    list_channels, list_targets, Client, ClientConfig, Has, Notice, Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -32,6 +32,15 @@ struct Cli {
 enum Command {
     /// List your servers and open DMs with their IDs.
     List {
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the channels of a server with their IDs, for --channel.
+    Channels {
+        /// Server ID (see `purgecord list`).
+        #[arg(value_name = "SERVER_ID")]
+        server: Snowflake,
         /// Print JSON instead of a table.
         #[arg(long)]
         json: bool,
@@ -69,6 +78,11 @@ struct Selection {
     /// All open DMs and group DMs.
     #[arg(long)]
     all_dms: bool,
+    /// Only this channel of a server; repeat for several. Narrows its server down to the
+    /// given channels (the server does not need to be selected with --target). Threads
+    /// are separate channels. See `purgecord channels <SERVER_ID>`.
+    #[arg(short, long = "channel", value_name = "ID")]
+    channels: Vec<Snowflake>,
 }
 
 #[derive(Args)]
@@ -145,7 +159,7 @@ impl Command {
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
-            Command::List { .. } => return Ok(()),
+            Command::List { .. } | Command::Channels { .. } => return Ok(()),
             Command::Preview {
                 selection,
                 range,
@@ -158,8 +172,12 @@ impl Command {
                 options,
             } => (selection, range, content, !options.dry_run && !options.yes),
         };
-        if selection.targets.is_empty() && !selection.all_servers && !selection.all_dms {
-            bail!("choose what to clean up: --target <ID>, --all-servers and/or --all-dms (see `purgecord list`)");
+        if selection.targets.is_empty()
+            && selection.channels.is_empty()
+            && !selection.all_servers
+            && !selection.all_dms
+        {
+            bail!("choose what to clean up: --target <ID>, --channel <ID>, --all-servers and/or --all-dms (see `purgecord list`)");
         }
         build_filter(range, content, false)?;
         if needs_confirmation && !io::stdin().is_terminal() {
@@ -202,6 +220,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{}", serde_json::to_string_pretty(&targets)?);
             } else {
                 print_targets(&targets);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Channels { server, json } => {
+            let channels = list_channels(&client, server)
+                .await
+                .with_context(|| format!("could not list the channels of {server}"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&channels)?);
+            } else {
+                println!("{:<20} {:<24} NAME", "ID", "CATEGORY");
+                for channel in channels {
+                    let category = channel.category.as_deref().unwrap_or("-");
+                    println!("{:<20} {category:<24} #{}", channel.id, channel.name);
+                }
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -303,14 +336,38 @@ async fn select(client: &Client, selection: &Selection) -> Result<Vec<Target>> {
     {
         bail!("{unknown} is neither one of your servers nor an open DM (see `purgecord list`)");
     }
-    Ok(available
-        .into_iter()
+    let mut chosen: Vec<Target> = available
+        .iter()
         .filter(|t| {
             selection.targets.contains(&t.id)
                 || (selection.all_servers && t.kind == TargetKind::Guild)
                 || (selection.all_dms && t.kind != TargetKind::Guild)
         })
-        .collect())
+        .cloned()
+        .collect();
+    for &channel_id in &selection.channels {
+        let channel = client
+            .channel(channel_id)
+            .await
+            .with_context(|| format!("could not look up channel {channel_id}"))?;
+        let Some(guild_id) = channel.guild_id else {
+            bail!("{channel_id} is not a server channel; choose DMs with --target");
+        };
+        let index = match chosen.iter().position(|t| t.id == guild_id) {
+            Some(index) => index,
+            None => {
+                let Some(guild) = available.iter().find(|t| t.id == guild_id) else {
+                    bail!("channel {channel_id} belongs to a server you are not a member of");
+                };
+                chosen.push(guild.clone());
+                chosen.len() - 1
+            }
+        };
+        if !chosen[index].channels.contains(&channel_id) {
+            chosen[index].channels.push(channel_id);
+        }
+    }
+    Ok(chosen)
 }
 
 /// Prints the number of matching messages per target and returns the total.
@@ -344,14 +401,22 @@ async fn preview(
 }
 
 fn print_preview_entry(entry: &PreviewEntry) {
+    let name = target_label(&entry.target);
     match (entry.count, &entry.error) {
-        (Some(count), _) => println!("{count:>8}  {}", entry.target.name),
+        (Some(count), _) => println!("{count:>8}  {name}"),
         (None, error) => println!(
-            "{:>8}  {} (could not search: {})",
+            "{:>8}  {name} (could not search: {})",
             "?",
-            entry.target.name,
             error.as_deref().unwrap_or("unknown error")
         ),
+    }
+}
+
+fn target_label(target: &Target) -> String {
+    match target.channels.len() {
+        0 => target.name.clone(),
+        1 => format!("{} (1 channel)", target.name),
+        n => format!("{} ({n} channels)", target.name),
     }
 }
 

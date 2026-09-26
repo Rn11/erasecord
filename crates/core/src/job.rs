@@ -217,6 +217,10 @@ pub async fn preview(
             control.sleep(options.search_delay_ms).await?;
         }
         control.checkpoint().await?;
+        let query = SearchQuery {
+            channel_ids: target.channels.clone(),
+            ..query.clone()
+        };
         let (count, error) = match control.guard(client.search(target.scope(), &query)).await? {
             Ok(response) => (Some(response.total_results), None),
             Err(Error::Unauthorized) => return Err(Error::Unauthorized),
@@ -346,6 +350,7 @@ impl Job<'_> {
                 self.control.checkpoint().await?;
                 let query = SearchQuery {
                     max_id: cursor,
+                    channel_ids: target.channels.clone(),
                     ..self.query.clone()
                 };
                 let response = self
@@ -388,7 +393,10 @@ impl Job<'_> {
     async fn handle(&self, target: &Target, message: Message, stats: &mut Stats) -> Result<()> {
         // The search already filters by author and time. Check again so a
         // misbehaving index can never make us delete anything else.
-        if message.author.id != self.me || !self.filter.contains(message.id) {
+        if message.author.id != self.me
+            || !self.filter.contains(message.id)
+            || !target.covers_channel(message.channel_id)
+        {
             return Ok(());
         }
         let skip = if !self.matcher.matches(&message) {

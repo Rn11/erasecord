@@ -28,6 +28,7 @@ async fn sends_the_token_and_search_parameters() {
         .and(query_param("sort_order", "desc"))
         .and(query_param("content", "hello world"))
         .and(query_param("has", "link"))
+        .and(query_param("channel_id", "77"))
         .respond_with(
             ResponseTemplate::new(200).set_body_json(json!({ "total_results": 3, "messages": [] })),
         )
@@ -40,6 +41,7 @@ async fn sends_the_token_and_search_parameters() {
         max_id: Some(Snowflake(9)),
         content: Some("hello world".into()),
         has: vec![Has::Link],
+        channel_ids: vec![Snowflake(77)],
     };
 
     let response = client_for(&server)

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { formatDuration } from "$lib/format";
+  import { formatDuration, targetLabel } from "$lib/format";
   import { activeMs, processed, type RunState } from "$lib/run";
   import Avatar from "./Avatar.svelte";
 
@@ -125,7 +125,7 @@
       {#each run.targets as item (item.target.id)}
         <div class="target" class:active={item.status === "running"}>
           <Avatar name={item.target.name} url={item.target.icon_url} size={24} />
-          <span class="name" title={item.error ?? undefined}>{item.target.name}</span>
+          <span class="name" title={item.error ?? undefined}>{targetLabel(item.target)}</span>
           <span class="state small num">
             {#if item.status === "pending"}
               <span class="muted">{finished ? "not started" : "waiting"}</span>

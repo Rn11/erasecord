@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { SvelteSet } from "svelte/reactivity";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import { isTauri } from "@tauri-apps/api/core";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
@@ -14,7 +14,7 @@
     type RangeForm,
   } from "$lib/format";
   import { applyEvent, newRun, type RunState } from "$lib/run";
-  import type { Filter, JobOptions, PreviewEntry, Target, User } from "$lib/types";
+  import type { Filter, GuildChannel, JobOptions, PreviewEntry, Target, User } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
   import Login from "$lib/components/Login.svelte";
   import Preview from "$lib/components/Preview.svelte";
@@ -31,6 +31,10 @@
   let targetsLoading = $state(false);
   let targetsError = $state<string | null>(null);
   const selected = new SvelteSet<string>();
+  /** Server ID → the channels picked in it; no entry means the whole server. */
+  const channelPicks = new SvelteMap<string, string[]>();
+  /** Server ID → its channels, once loaded. */
+  const channelLists = new SvelteMap<string, { loading: boolean; error: string | null; channels: GuildChannel[] }>();
   let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
   let content = $state<ContentForm>(emptyContent());
   let skipPinned = $state(true);
@@ -45,7 +49,9 @@
 
   let run = $state<RunState | null>(null);
 
-  const selectedTargets = $derived(targets.filter((t) => selected.has(t.id)));
+  const selectedTargets = $derived(
+    targets.filter((t) => selected.has(t.id)).map((t) => ({ ...t, channels: channelPicks.get(t.id) ?? [] })),
+  );
   const busy = $derived(counting || (run !== null && run.summary === null));
 
   const unlisten: UnlistenFn[] = [];
@@ -101,10 +107,24 @@
       targets = await api.listTargets();
       const known = new Set(targets.map((t) => t.id));
       for (const id of [...selected]) if (!known.has(id)) selected.delete(id);
+      for (const id of [...channelPicks.keys()]) if (!known.has(id)) channelPicks.delete(id);
+      channelLists.clear();
     } catch (err) {
       targetsError = fail(err);
     } finally {
       targetsLoading = false;
+    }
+  }
+
+  async function loadChannels(guildId: string) {
+    const current = channelLists.get(guildId);
+    if (current && (current.loading || !current.error)) return;
+    channelLists.set(guildId, { loading: true, error: null, channels: [] });
+    try {
+      const channels = await api.listChannels(guildId);
+      channelLists.set(guildId, { loading: false, error: null, channels });
+    } catch (err) {
+      channelLists.set(guildId, { loading: false, error: fail(err) ?? "Not logged in", channels: [] });
     }
   }
 
@@ -113,6 +133,8 @@
     user = null;
     targets = [];
     selected.clear();
+    channelPicks.clear();
+    channelLists.clear();
     run = null;
     notice = null;
     screen = "login";
@@ -215,6 +237,9 @@
         loading={targetsLoading}
         error={targetsError}
         {selected}
+        {channelPicks}
+        {channelLists}
+        onLoadChannels={loadChannels}
         bind:range
         bind:content
         bind:skipPinned

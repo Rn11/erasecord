@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { checksLocally, describeFilter, plural } from "$lib/format";
+  import { checksLocally, describeFilter, plural, targetLabel } from "$lib/format";
   import type { Filter, PreviewEntry, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -37,6 +37,7 @@
       .join(" and "),
   );
   const failures = $derived(entries.filter((e) => e.error).length);
+  const upTo = $derived(checksLocally(filter) || filter.skip_pinned ? "up to " : "");
 
   function confirmDelete() {
     dialog?.close();
@@ -60,7 +61,7 @@
       {@const entry = byId.get(target.id)}
       <div class="row" role="row">
         <Avatar name={target.name} url={target.icon_url} size={24} />
-        <span class="name" role="cell">{target.name}</span>
+        <span class="name" role="cell">{targetLabel(target)}</span>
         <span class="value num" role="cell">
           {#if !entry}
             {#if counting}<span class="spinner muted"></span>{/if}
@@ -106,14 +107,14 @@
       <span class="spacer"></span>
       <button class="btn" onclick={() => onStart(true)} disabled={total === 0}>List them first (dry run)</button>
       <button class="btn danger" onclick={() => dialog?.showModal()} disabled={total === 0}>
-        {total === 0 ? "Nothing to delete" : `Delete ${plural(total, "message")}`}
+        {total === 0 ? "Nothing to delete" : `Delete ${upTo}${plural(total, "message")}`}
       </button>
     {/if}
   </footer>
 </section>
 
 <dialog bind:this={dialog} class="card confirm" aria-labelledby="confirm-title">
-  <h2 id="confirm-title">Delete {plural(total, "message")}?</h2>
+  <h2 id="confirm-title">Delete {upTo}{plural(total, "message")}?</h2>
   <p>
     Your messages {describeFilter(filter)} will be deleted from {places}. <strong>This cannot be undone.</strong>
   </p>

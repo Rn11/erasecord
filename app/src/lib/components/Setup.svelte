@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SvelteSet } from "svelte/reactivity";
+  import { SvelteSet, type SvelteMap } from "svelte/reactivity";
   import {
     HAS_KINDS,
     contentProblem,
@@ -10,7 +10,7 @@
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
-  import type { Has, JobOptions, Target } from "$lib/types";
+  import type { GuildChannel, Has, JobOptions, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
   let {
@@ -18,6 +18,9 @@
     loading,
     error,
     selected,
+    channelPicks,
+    channelLists,
+    onLoadChannels,
     range = $bindable(),
     content = $bindable(),
     skipPinned = $bindable(),
@@ -29,6 +32,9 @@
     loading: boolean;
     error: string | null;
     selected: SvelteSet<string>;
+    channelPicks: SvelteMap<string, string[]>;
+    channelLists: SvelteMap<string, { loading: boolean; error: string | null; channels: GuildChannel[] }>;
+    onLoadChannels: (guildId: string) => void;
     range: RangeForm;
     content: ContentForm;
     skipPinned: boolean;
@@ -59,10 +65,44 @@
     content[list] = current.includes(kind) ? current.filter((k) => k !== kind) : [...current, kind];
   }
 
+  const expanded = new SvelteSet<string>();
+
   function toggle(id: string) {
-    if (selected.has(id)) selected.delete(id);
-    else selected.add(id);
+    if (selected.has(id)) {
+      selected.delete(id);
+      channelPicks.delete(id);
+    } else selected.add(id);
   }
+
+  function toggleExpanded(id: string) {
+    if (expanded.has(id)) expanded.delete(id);
+    else {
+      expanded.add(id);
+      onLoadChannels(id);
+    }
+  }
+
+  function toggleChannel(guildId: string, channelId: string) {
+    const picks = channelPicks.get(guildId) ?? [];
+    const next = picks.includes(channelId) ? picks.filter((id) => id !== channelId) : [...picks, channelId];
+    if (next.length) {
+      channelPicks.set(guildId, next);
+      selected.add(guildId);
+    } else channelPicks.delete(guildId);
+  }
+
+  /** Channels grouped under their category, keeping Discord's order. */
+  function grouped(channels: GuildChannel[]): { category: string | null; channels: GuildChannel[] }[] {
+    const groups: { category: string | null; channels: GuildChannel[] }[] = [];
+    for (const channel of channels) {
+      const last = groups[groups.length - 1];
+      if (last && last.category === channel.category) last.channels.push(channel);
+      else groups.push({ category: channel.category, channels: [channel] });
+    }
+    return groups;
+  }
+
+  const channelIcon = (kind: number) => (kind === 2 || kind === 13 ? "🔊" : kind === 5 ? "📢" : "#");
 
   function toggleVisible() {
     const select = !allVisibleSelected;
@@ -104,12 +144,59 @@
         <p class="empty muted">{query ? "Nothing matches your filter." : tab === "servers" ? "You are not in any server." : "No open DMs."}</p>
       {:else}
         {#each visible as target (target.id)}
+          {@const picks = channelPicks.get(target.id) ?? []}
           <label class="row" class:checked={selected.has(target.id)}>
             <input type="checkbox" checked={selected.has(target.id)} onchange={() => toggle(target.id)} />
             <Avatar name={target.name} url={target.icon_url} size={28} />
             <span class="name">{target.name}</span>
             {#if target.kind === "group_dm"}<span class="tag">group</span>{/if}
+            {#if picks.length}<span class="tag picked">{plural(picks.length, "channel")}</span>{/if}
+            {#if target.kind === "guild"}
+              <button
+                type="button"
+                class="btn ghost small expand"
+                aria-expanded={expanded.has(target.id)}
+                title="Pick single channels"
+                onclick={(event) => {
+                  event.preventDefault();
+                  toggleExpanded(target.id);
+                }}
+              >
+                Channels <span class="chevron" class:open={expanded.has(target.id)}>▾</span>
+              </button>
+            {/if}
           </label>
+          {#if expanded.has(target.id)}
+            {@const list = channelLists.get(target.id)}
+            <div class="channels">
+              {#if !list || list.loading}
+                <p class="small muted"><span class="spinner"></span> Loading channels…</p>
+              {:else if list.error}
+                <p class="small problem">{list.error}</p>
+              {:else if list.channels.length === 0}
+                <p class="small muted">No channels you can see.</p>
+              {:else}
+                <p class="small muted">
+                  {picks.length ? "Only the ticked channels are cleaned up." : "Tick channels to clean up only those; otherwise the whole server is."}
+                </p>
+                {#each grouped(list.channels) as group, i (i)}
+                  {#if group.category}<div class="category small">{group.category}</div>{/if}
+                  {#each group.channels as channel (channel.id)}
+                    <label class="channel" class:checked={picks.includes(channel.id)}>
+                      <input
+                        type="checkbox"
+                        checked={picks.includes(channel.id)}
+                        onchange={() => toggleChannel(target.id, channel.id)}
+                      />
+                      <span class="icon muted" aria-hidden="true">{channelIcon(channel.kind)}</span>
+                      <span class="name">{channel.name}</span>
+                    </label>
+                  {/each}
+                {/each}
+                <p class="small muted">Threads and forum posts are only included when the whole server is selected.</p>
+              {/if}
+            </div>
+          {/if}
         {/each}
       {/if}
     </div>
@@ -361,6 +448,73 @@
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0 7px;
+    white-space: nowrap;
+  }
+
+  .tag.picked {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .expand {
+    padding: 2px 8px;
+  }
+
+  .chevron {
+    display: inline-block;
+    transition: transform 0.15s ease;
+  }
+
+  .chevron.open {
+    transform: rotate(180deg);
+  }
+
+  .channels {
+    margin: 0 8px 6px 46px;
+    padding: 6px 0 6px 10px;
+    border-left: 2px solid var(--border);
+    display: grid;
+    gap: 2px;
+  }
+
+  .channels > p {
+    padding: 2px 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .category {
+    margin-top: 6px;
+    padding: 0 6px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .channel {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .channel:hover {
+    background: var(--panel-2);
+  }
+
+  .channel.checked {
+    background: var(--accent-soft);
+  }
+
+  .icon {
+    width: 16px;
+    text-align: center;
+    font-size: 12px;
   }
 
   .empty {

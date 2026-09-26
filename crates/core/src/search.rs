@@ -35,6 +35,8 @@ pub struct SearchQuery {
     pub content: Option<String>,
     /// Only messages with any of these.
     pub has: Vec<Has>,
+    /// Only messages in these channels of a server.
+    pub channel_ids: Vec<Snowflake>,
 }
 
 impl SearchQuery {
@@ -56,6 +58,9 @@ impl SearchQuery {
         }
         if let Some(content) = &self.content {
             params.push(("content", content.clone()));
+        }
+        for id in &self.channel_ids {
+            params.push(("channel_id", id.to_string()));
         }
         for has in &self.has {
             params.push(("has", has.as_str().to_owned()));

@@ -17,6 +17,16 @@ export interface Target {
   id: Snowflake;
   name: string;
   icon_url: string | null;
+  /** For servers: only these channels; empty means all. */
+  channels: Snowflake[];
+}
+
+export interface GuildChannel {
+  id: Snowflake;
+  name: string;
+  /** Discord channel type: 0 text, 2 voice, 5 announcement, 13 stage. */
+  kind: number;
+  category: string | null;
 }
 
 export type Has = "link" | "file" | "image" | "video" | "sound" | "embed" | "sticker";

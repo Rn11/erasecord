@@ -33,8 +33,13 @@ pub struct Guild {
 
 /// Values of [`Channel::kind`] that purgecord cares about.
 pub mod channel_type {
+    pub const TEXT: u8 = 0;
     pub const DM: u8 = 1;
+    pub const VOICE: u8 = 2;
     pub const GROUP_DM: u8 = 3;
+    pub const CATEGORY: u8 = 4;
+    pub const ANNOUNCEMENT: u8 = 5;
+    pub const STAGE: u8 = 13;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +55,13 @@ pub struct Channel {
     pub recipients: Vec<User>,
     #[serde(default)]
     pub last_message_id: Option<Snowflake>,
+    #[serde(default)]
+    pub guild_id: Option<Snowflake>,
+    /// The category a server channel is in.
+    #[serde(default)]
+    pub parent_id: Option<Snowflake>,
+    #[serde(default)]
+    pub position: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

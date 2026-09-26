@@ -2,7 +2,7 @@
 //! here in Rust, so the token never reaches the web view after login.
 
 use purgecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
-use purgecord_core::{Client, ClientConfig, Error, Target, User};
+use purgecord_core::{Client, ClientConfig, Error, GuildChannel, Snowflake, Target, User};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -141,6 +141,15 @@ pub async fn logout(state: State<'_, AppState>) -> CommandResult<()> {
 pub async fn list_targets(state: State<'_, AppState>) -> CommandResult<Vec<Target>> {
     let session = state.session()?;
     Ok(purgecord_core::list_targets(&session.client).await?)
+}
+
+#[tauri::command]
+pub async fn list_channels(
+    state: State<'_, AppState>,
+    guild_id: Snowflake,
+) -> CommandResult<Vec<GuildChannel>> {
+    let session = state.session()?;
+    Ok(purgecord_core::list_channels(&session.client, guild_id).await?)
 }
 
 #[tauri::command]
