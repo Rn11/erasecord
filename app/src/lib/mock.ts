@@ -146,6 +146,8 @@ async function simulate(selected: Target[], filter: Filter, dryRun: boolean, ove
           message_id,
           sent_at: new Date(Date.now() - (i + 40) * 86_400_000).toISOString(),
           preview: samples[i % samples.length],
+          content: samples[i % samples.length],
+          attachments: [],
           dry_run: dryRun,
         });
       }
@@ -211,6 +213,11 @@ export function installMockBackend() {
           }
           return entries;
         }
+        case "plugin:dialog|save":
+          return "/home/demo/Documents/erasecord-export.csv";
+        case "export_run":
+          await sleep(200);
+          return 42;
         case "plugin:dialog|open":
           return "/home/demo/Downloads/package.zip";
         case "import_package":

@@ -127,6 +127,8 @@ export type JobEvent =
       message_id: Snowflake;
       sent_at: string;
       preview: string;
+      content: string;
+      attachments: string[];
       dry_run: boolean;
     }
   | { type: "skipped"; target_id: Snowflake; message_id: Snowflake; reason: SkipReason }

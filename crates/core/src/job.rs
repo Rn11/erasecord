@@ -104,6 +104,10 @@ pub enum Event {
         message_id: Snowflake,
         sent_at: DateTime<Utc>,
         preview: String,
+        /// The full text, for exports.
+        content: String,
+        /// Attachment URLs, for exports.
+        attachments: Vec<String>,
         dry_run: bool,
     },
     Skipped {
@@ -660,6 +664,12 @@ impl Job<'_> {
             message_id: message.id,
             sent_at: message.id.created_at(),
             preview: preview_text(message),
+            content: message.content.clone(),
+            attachments: message
+                .attachments
+                .iter()
+                .filter_map(|a| a["url"].as_str().map(str::to_owned))
+                .collect(),
             dry_run,
         });
     }

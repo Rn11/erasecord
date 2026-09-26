@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
+  import { save } from "@tauri-apps/plugin-dialog";
+  import { api, asCommandError } from "$lib/api";
   import { formatDuration, targetLabel } from "$lib/format";
   import { activeMs, processed, type RunState } from "$lib/run";
   import Avatar from "./Avatar.svelte";
@@ -55,6 +57,32 @@
     if (logBox) follow = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
   }
 
+  let exporting = $state(false);
+  let exportResult = $state<{ ok: boolean; text: string } | null>(null);
+
+  async function exportList() {
+    exportResult = null;
+    const day = new Date().toISOString().slice(0, 10);
+    try {
+      const path = await save({
+        title: "Save the list of messages",
+        defaultPath: `erasecord-${run.dryRun ? "dry-run" : "deleted"}-${day}.csv`,
+        filters: [
+          { name: "CSV (spreadsheet)", extensions: ["csv"] },
+          { name: "JSON", extensions: ["json"] },
+        ],
+      });
+      if (!path) return;
+      exporting = true;
+      const rows = await api.exportRun(path);
+      exportResult = { ok: true, text: `Saved ${rows.toLocaleString()} message${rows === 1 ? "" : "s"} to ${path}` };
+    } catch (err) {
+      exportResult = { ok: false, text: asCommandError(err).message };
+    } finally {
+      exporting = false;
+    }
+  }
+
   const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 </script>
 
@@ -67,6 +95,14 @@
       </h2>
       <div class="actions">
         {#if finished}
+          <button
+            class="btn"
+            onclick={exportList}
+            disabled={exporting || run.totals.deleted === 0}
+            title="Save every message of this run with its text and attachment links, as CSV or JSON"
+          >
+            {#if exporting}<span class="spinner"></span>{/if} Save list…
+          </button>
           <button class="btn primary" onclick={onDone}>Start a new clean-up</button>
         {:else}
           {#if paused}
@@ -111,6 +147,9 @@
       </div>
     </div>
 
+    {#if exportResult}
+      <p class="callout small" class:info={exportResult.ok} class:error={!exportResult.ok}>{exportResult.text}</p>
+    {/if}
     {#if run.summary?.error}
       <p class="callout error small">{run.summary.error}</p>
     {:else if finished && run.dryRun}
