@@ -191,7 +191,7 @@ fn sort_channels(channels: Vec<Channel>) -> Vec<GuildChannel> {
             (key, item)
         })
         .collect();
-    listed.sort_by(|a, b| a.0.cmp(&b.0));
+    listed.sort_by_key(|a| a.0);
     listed.into_iter().map(|(_, item)| item).collect()
 }
 
