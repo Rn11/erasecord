@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "app/src-tauri"]
+# The Tauri app needs WebKitGTK system libraries on Linux; keep plain
+# `cargo build` / `cargo test` limited to the portable crates.
+default-members = ["crates/core", "crates/cli", "app/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Rn11/purgecord"
+
+# Small, fast release binaries (see https://tauri.app/concept/size/).
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

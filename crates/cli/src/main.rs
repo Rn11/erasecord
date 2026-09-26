@@ -1,0 +1,573 @@
+//! Command line front end for purgecord.
+
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
+use clap::{Args, Parser, Subcommand};
+use purgecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
+use purgecord_core::{list_targets, Client, ClientConfig, Notice, Snowflake, Target, TargetKind};
+use tokio::sync::mpsc;
+
+#[derive(Parser)]
+#[command(
+    name = "purgecord",
+    version,
+    about = "Delete your own Discord messages from selected servers and DMs.",
+    after_help = "The token is read from the DISCORD_TOKEN environment variable, or asked for \
+                  (hidden) when it is not set. Automating a user account is against Discord's \
+                  Terms of Service; use at your own risk."
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// List your servers and open DMs with their IDs.
+    List {
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Count your messages that match, without deleting anything.
+    Preview {
+        #[command(flatten)]
+        selection: Selection,
+        #[command(flatten)]
+        range: Range,
+    },
+    /// Delete your messages that match.
+    Delete {
+        #[command(flatten)]
+        selection: Selection,
+        #[command(flatten)]
+        range: Range,
+        #[command(flatten)]
+        options: DeleteOptions,
+    },
+}
+
+#[derive(Args)]
+struct Selection {
+    /// Server or DM channel ID to clean up; repeat for several. See `purgecord list`.
+    #[arg(short, long = "target", value_name = "ID")]
+    targets: Vec<Snowflake>,
+    /// All servers you are a member of.
+    #[arg(long)]
+    all_servers: bool,
+    /// All open DMs and group DMs.
+    #[arg(long)]
+    all_dms: bool,
+}
+
+#[derive(Args)]
+struct Range {
+    /// Only messages sent at or after DATE: YYYY-MM-DD (local time), an RFC 3339
+    /// timestamp, or an age such as 30d, 12w, 6m or 1y.
+    #[arg(long, value_name = "DATE", value_parser = parse_time)]
+    after: Option<DateTime<Utc>>,
+    /// Only messages sent before DATE (same formats). `--before 30d` keeps the last 30 days.
+    #[arg(long, value_name = "DATE", value_parser = parse_time)]
+    before: Option<DateTime<Utc>>,
+}
+
+#[derive(Args)]
+struct DeleteOptions {
+    /// Keep pinned messages.
+    #[arg(long)]
+    skip_pinned: bool,
+    /// List what would be deleted without deleting anything.
+    #[arg(long)]
+    dry_run: bool,
+    /// Do not ask for confirmation.
+    #[arg(short, long)]
+    yes: bool,
+    /// Print every deleted or skipped message.
+    #[arg(short, long)]
+    verbose: bool,
+    /// Pause after each deletion, in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = JobOptions::default().delete_delay_ms)]
+    delete_delay: u64,
+    /// Pause between search requests, in milliseconds.
+    #[arg(long, value_name = "MS", default_value_t = JobOptions::default().search_delay_ms)]
+    search_delay: u64,
+}
+
+impl Range {
+    fn filter(&self, skip_pinned: bool) -> Result<Filter> {
+        if let (Some(after), Some(before)) = (self.after, self.before) {
+            if after >= before {
+                bail!("--after must be earlier than --before");
+            }
+        }
+        Ok(Filter {
+            after: self.after,
+            before: self.before,
+            skip_pinned,
+        })
+    }
+}
+
+impl Command {
+    /// Catches usage mistakes before logging in.
+    fn check(&self) -> Result<()> {
+        let (selection, range, needs_confirmation) = match self {
+            Command::List { .. } => return Ok(()),
+            Command::Preview { selection, range } => (selection, range, false),
+            Command::Delete {
+                selection,
+                range,
+                options,
+            } => (selection, range, !options.dry_run && !options.yes),
+        };
+        if selection.targets.is_empty() && !selection.all_servers && !selection.all_dms {
+            bail!("choose what to clean up: --target <ID>, --all-servers and/or --all-dms (see `purgecord list`)");
+        }
+        range.filter(false)?;
+        if needs_confirmation && !io::stdin().is_terminal() {
+            bail!("refusing to delete without confirmation; pass --yes to skip it");
+        }
+        Ok(())
+    }
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run(Cli::parse()).await {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run(cli: Cli) -> Result<ExitCode> {
+    cli.command.check()?;
+    let mut config = ClientConfig::default();
+    // For testing against a fake API server.
+    if let Ok(api_base) = std::env::var("PURGECORD_API_BASE") {
+        config.api_base = api_base;
+    }
+    let client = Client::with_config(&read_token()?, config)?;
+    let me = client.current_user().await.context("could not log in")?;
+    eprintln!("Logged in as {} ({})", me.display_name(), me.id);
+
+    let control = JobControl::new();
+    let graceful = Arc::new(AtomicBool::new(false));
+    handle_ctrl_c(control.clone(), graceful.clone());
+
+    match cli.command {
+        Command::List { json } => {
+            let targets = list_targets(&client).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&targets)?);
+            } else {
+                print_targets(&targets);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Preview { selection, range } => {
+            let targets = select(&client, &selection).await?;
+            let filter = range.filter(false)?;
+            preview(
+                &client,
+                me.id,
+                &targets,
+                &filter,
+                &JobOptions::default(),
+                &control,
+            )
+            .await?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Delete {
+            selection,
+            range,
+            options,
+        } => {
+            let targets = select(&client, &selection).await?;
+            let filter = range.filter(options.skip_pinned)?;
+            let job_options = JobOptions {
+                delete_delay_ms: options.delete_delay,
+                search_delay_ms: options.search_delay,
+                dry_run: options.dry_run,
+                ..Default::default()
+            };
+            if !options.dry_run && !options.yes {
+                let total =
+                    preview(&client, me.id, &targets, &filter, &job_options, &control).await?;
+                if total == 0 {
+                    println!("Nothing to delete.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                if !confirm(total)? {
+                    println!("Nothing was deleted.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+            }
+            graceful.store(true, Ordering::SeqCst);
+            delete(
+                client,
+                me.id,
+                targets,
+                filter,
+                job_options,
+                control,
+                options.verbose,
+            )
+            .await
+        }
+    }
+}
+
+fn read_token() -> Result<String> {
+    if let Ok(token) = std::env::var("DISCORD_TOKEN") {
+        if !token.trim().is_empty() {
+            return Ok(token);
+        }
+    }
+    if !io::stdin().is_terminal() {
+        bail!("set DISCORD_TOKEN, or run purgecord in a terminal to type the token");
+    }
+    Ok(rpassword::prompt_password(
+        "Discord token (input hidden): ",
+    )?)
+}
+
+/// Before deleting starts, Ctrl+C quits at once. While deleting, the first
+/// Ctrl+C stops after the current request and the second quits.
+fn handle_ctrl_c(control: JobControl, graceful: Arc<AtomicBool>) {
+    tokio::spawn(async move {
+        while tokio::signal::ctrl_c().await.is_ok() {
+            if graceful.load(Ordering::SeqCst) && !control.is_cancelled() {
+                eprintln!("\nStopping after the current request; press Ctrl+C again to quit now.");
+                control.cancel();
+            } else {
+                eprintln!();
+                std::process::exit(130);
+            }
+        }
+    });
+}
+
+async fn select(client: &Client, selection: &Selection) -> Result<Vec<Target>> {
+    let available = list_targets(client).await?;
+    if let Some(unknown) = selection
+        .targets
+        .iter()
+        .find(|id| !available.iter().any(|t| t.id == **id))
+    {
+        bail!("{unknown} is neither one of your servers nor an open DM (see `purgecord list`)");
+    }
+    Ok(available
+        .into_iter()
+        .filter(|t| {
+            selection.targets.contains(&t.id)
+                || (selection.all_servers && t.kind == TargetKind::Guild)
+                || (selection.all_dms && t.kind != TargetKind::Guild)
+        })
+        .collect())
+}
+
+/// Prints the number of matching messages per target and returns the total.
+async fn preview(
+    client: &Client,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+) -> Result<u64> {
+    eprintln!(
+        "Counting matching messages in {} server(s)/DM(s)…",
+        targets.len()
+    );
+    let entries = job::preview(client, me, targets, filter, options, control, |_, entry| {
+        print_preview_entry(entry)
+    })
+    .await?;
+    let total = entries.iter().filter_map(|e| e.count).sum();
+    println!("{:>8}  total", total);
+    if filter.skip_pinned {
+        println!("          (pinned messages are included in the counts but will be kept)");
+    }
+    Ok(total)
+}
+
+fn print_preview_entry(entry: &PreviewEntry) {
+    match (entry.count, &entry.error) {
+        (Some(count), _) => println!("{count:>8}  {}", entry.target.name),
+        (None, error) => println!(
+            "{:>8}  {} (could not search: {})",
+            "?",
+            entry.target.name,
+            error.as_deref().unwrap_or("unknown error")
+        ),
+    }
+}
+
+fn confirm(total: u64) -> Result<bool> {
+    print!("Permanently delete up to {total} messages? Type 'delete' to continue: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().lock().read_line(&mut answer)?;
+    Ok(answer.trim().eq_ignore_ascii_case("delete"))
+}
+
+async fn delete(
+    client: Client,
+    me: Snowflake,
+    targets: Vec<Target>,
+    filter: Filter,
+    options: JobOptions,
+    control: JobControl,
+    verbose: bool,
+) -> Result<ExitCode> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let dry_run = options.dry_run;
+    let target_count = targets.len();
+    let task = tokio::spawn(async move {
+        job::run(&client, me, &targets, &filter, &options, &control, tx).await
+    });
+
+    let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);
+    while let Some(event) = rx.recv().await {
+        progress.handle(&event);
+    }
+    let summary = task.await?;
+
+    println!(
+        "Done: {} {}, {} skipped, {} failed.",
+        summary.stats.deleted, progress.deleted_label, summary.stats.skipped, summary.stats.failed
+    );
+    if let Some(error) = summary.error {
+        bail!("stopped early: {error}");
+    }
+    if summary.cancelled {
+        println!("Stopped before the end.");
+        return Ok(ExitCode::from(130));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Prints job events; on a terminal it keeps a live status line at the bottom.
+struct Progress {
+    target_count: usize,
+    verbose: bool,
+    /// "deleted", or "would be deleted" in a dry run.
+    deleted_label: &'static str,
+    live: bool,
+    estimate: Option<u64>,
+    stats: Stats,
+}
+
+impl Progress {
+    fn new(target_count: usize, verbose: bool, dry_run: bool) -> Self {
+        Progress {
+            target_count,
+            verbose,
+            deleted_label: if dry_run {
+                "would be deleted"
+            } else {
+                "deleted"
+            },
+            live: io::stderr().is_terminal(),
+            estimate: None,
+            stats: Stats::default(),
+        }
+    }
+
+    fn handle(&mut self, event: &Event) {
+        match event {
+            Event::TargetStarted { index, name, .. } => {
+                self.estimate = None;
+                self.stats = Stats::default();
+                self.line(format!("[{}/{}] {name}", index + 1, self.target_count));
+            }
+            Event::TargetEstimate { total, .. } => self.estimate = Some(*total),
+            Event::Deleted {
+                sent_at,
+                preview,
+                dry_run,
+                ..
+            } => {
+                self.stats.deleted += 1;
+                if self.verbose {
+                    let verb = if *dry_run { "would delete" } else { "deleted" };
+                    let sent = sent_at.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+                    self.line(format!("  {verb} {sent}  {preview}"));
+                }
+            }
+            Event::Skipped {
+                message_id, reason, ..
+            } => {
+                self.stats.skipped += 1;
+                if self.verbose {
+                    self.line(format!("  skipped {message_id} ({})", reason.describe()));
+                }
+            }
+            Event::Failed {
+                message_id, error, ..
+            } => {
+                self.stats.failed += 1;
+                self.line(format!("  failed to delete {message_id}: {error}"));
+            }
+            Event::TargetFailed { error, .. } => self.line(format!("  could not search: {error}")),
+            Event::TargetFinished { stats, .. } => self.line(format!(
+                "  {} {}, {} skipped, {} failed",
+                stats.deleted, self.deleted_label, stats.skipped, stats.failed
+            )),
+            Event::Notice { notice } => self.line(format!("  {}", describe_notice(notice))),
+            Event::Finished(_) => {
+                self.clear_status();
+                return;
+            }
+        }
+        self.status();
+    }
+
+    fn line(&self, text: String) {
+        self.clear_status();
+        eprintln!("{text}");
+    }
+
+    fn status(&self) {
+        if !self.live {
+            return;
+        }
+        let of = self
+            .estimate
+            .map(|n| format!(" of ~{n}"))
+            .unwrap_or_default();
+        let status = format!(
+            "  {}{of} {}, {} skipped, {} failed",
+            self.stats.deleted, self.deleted_label, self.stats.skipped, self.stats.failed
+        );
+        eprint!("\r{status:<60}");
+        let _ = io::stderr().flush();
+    }
+
+    fn clear_status(&self) {
+        if self.live {
+            eprint!("\r{:<60}\r", "");
+        }
+    }
+}
+
+fn describe_notice(notice: &Notice) -> String {
+    let seconds = |ms: &u64| *ms as f64 / 1000.0;
+    match notice {
+        Notice::RateLimited { wait_ms, global } => format!(
+            "rate limited{}, waiting {:.1}s",
+            if *global { " (global)" } else { "" },
+            seconds(wait_ms)
+        ),
+        Notice::IndexNotReady { wait_ms } => {
+            format!(
+                "Discord is still indexing messages, waiting {:.1}s",
+                seconds(wait_ms)
+            )
+        }
+        Notice::Retrying {
+            reason,
+            attempt,
+            wait_ms,
+        } => format!("{reason}; retry {attempt} in {:.1}s", seconds(wait_ms)),
+    }
+}
+
+fn print_targets(targets: &[Target]) {
+    println!("{:<9} {:<20} NAME", "KIND", "ID");
+    for target in targets {
+        let kind = match target.kind {
+            TargetKind::Guild => "server",
+            TargetKind::Dm => "dm",
+            TargetKind::GroupDm => "group-dm",
+        };
+        println!("{kind:<9} {:<20} {}", target.id, target.name);
+    }
+}
+
+fn parse_time(input: &str) -> Result<DateTime<Utc>, String> {
+    let input = input.trim();
+    if let Some(time) = parse_age(input) {
+        return time;
+    }
+    if let Ok(time) = DateTime::parse_from_rfc3339(input) {
+        return Ok(time.with_timezone(&Utc));
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(input, "%Y-%m-%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(Local).earliest())
+            .map(|t| t.with_timezone(&Utc))
+            .ok_or_else(|| format!("{input} does not exist in your time zone"));
+    }
+    Err(format!(
+        "expected YYYY-MM-DD, an RFC 3339 timestamp or an age like 30d/12w/6m/1y, got {input:?}"
+    ))
+}
+
+/// "30d", "12w", "6m", "1y": that long before now.
+fn parse_age(input: &str) -> Option<Result<DateTime<Utc>, String>> {
+    let unit = input.chars().last()?;
+    let amount: u32 = input[..input.len() - unit.len_utf8()].parse().ok()?;
+    let now = Utc::now();
+    let time = match unit {
+        'd' => now.checked_sub_signed(TimeDelta::days(amount.into())),
+        'w' => now.checked_sub_signed(TimeDelta::weeks(amount.into())),
+        'm' => now.checked_sub_months(Months::new(amount)),
+        'y' => now.checked_sub_months(Months::new(amount.checked_mul(12)?)),
+        _ => return None,
+    };
+    Some(time.ok_or_else(|| format!("{input} is too far in the past")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ages() {
+        let thirty_days = parse_time("30d").unwrap();
+        let expected = Utc::now() - TimeDelta::days(30);
+        assert!((thirty_days - expected).num_seconds().abs() < 5);
+        assert!(parse_time("2w").unwrap() < parse_time("1w").unwrap());
+        assert!(parse_time("1y").unwrap() < parse_time("11m").unwrap());
+    }
+
+    #[test]
+    fn parses_dates_and_timestamps() {
+        assert_eq!(
+            parse_time("2024-03-01T12:00:00Z").unwrap().to_rfc3339(),
+            "2024-03-01T12:00:00+00:00"
+        );
+        let local_midnight = parse_time("2024-03-01").unwrap().with_timezone(&Local);
+        assert_eq!(
+            local_midnight.format("%Y-%m-%d %H:%M").to_string(),
+            "2024-03-01 00:00"
+        );
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        for input in ["", "d", "yesterday", "30x", "2024-13-01", "ü"] {
+            assert!(parse_time(input).is_err(), "{input:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn after_must_precede_before() {
+        let range = Range {
+            after: parse_time("2024-02-01").ok(),
+            before: parse_time("2024-01-01").ok(),
+        };
+        assert!(range.filter(false).is_err());
+    }
+}

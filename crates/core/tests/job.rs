@@ -1,0 +1,364 @@
+mod common;
+
+use std::time::Duration;
+
+use common::*;
+use purgecord_core::{
+    job, Event, Filter, JobControl, JobOptions, SkipReason, Snowflake, Summary, Target,
+};
+use tokio::sync::mpsc;
+use wiremock::matchers::any;
+use wiremock::{Mock, ResponseTemplate};
+
+fn fast() -> JobOptions {
+    JobOptions {
+        delete_delay_ms: 0,
+        search_delay_ms: 0,
+        ..Default::default()
+    }
+}
+
+async fn run_job(
+    fake: &FakeDiscord,
+    targets: &[Target],
+    filter: Filter,
+    options: JobOptions,
+) -> (Summary, Vec<Event>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (client, control) = (fake.client(), JobControl::new());
+    let run = job::run(
+        &client,
+        Snowflake(ME),
+        targets,
+        &filter,
+        &options,
+        &control,
+        tx,
+    );
+    let summary = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("job did not finish");
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    (summary, events)
+}
+
+#[tokio::test]
+async fn deletes_only_own_messages_inside_the_range() {
+    let mut messages = Vec::new();
+    for minute in 0..30 {
+        messages.push(FakeMessage::in_guild(minute, 0, ME));
+        messages.push(FakeMessage::in_guild(minute, 1, OTHER));
+    }
+    let fake = FakeDiscord::start(State::with_messages(messages.clone())).await;
+    let filter = Filter {
+        after: Some(at(10)),
+        before: Some(at(20)),
+        skip_pinned: false,
+    };
+
+    let (summary, events) = run_job(&fake, &[guild_target()], filter, fast()).await;
+
+    assert_eq!(summary.stats.deleted, 10);
+    assert_eq!((summary.cancelled, summary.error), (false, None));
+    let mut expected: Vec<u64> = messages
+        .iter()
+        .filter(|m| !(m.author_id == ME && (10..20).any(|min| m.id == id_at(min, 0))))
+        .map(|m| m.id)
+        .collect();
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+    assert!(matches!(events.last(), Some(Event::Finished(_))));
+}
+
+#[tokio::test]
+async fn pages_through_more_than_one_search_page() {
+    let messages = (0..60)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+
+    let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), fast()).await;
+
+    assert_eq!(summary.stats.deleted, 60);
+    assert_eq!(fake.delete_calls(), 60);
+    assert!(fake.remaining().is_empty());
+}
+
+#[tokio::test]
+async fn skips_pinned_system_and_forbidden_messages() {
+    let normal = FakeMessage::in_guild(0, 0, ME);
+    let pinned = FakeMessage {
+        pinned: true,
+        ..FakeMessage::in_guild(1, 0, ME)
+    };
+    let system = FakeMessage {
+        kind: 7,
+        ..FakeMessage::in_guild(2, 0, ME)
+    };
+    let forbidden = FakeMessage::in_guild(3, 0, ME);
+    let archived = FakeMessage::in_guild(4, 0, ME);
+    let mut state = State::with_messages(vec![
+        normal.clone(),
+        pinned.clone(),
+        system.clone(),
+        forbidden.clone(),
+        archived.clone(),
+    ]);
+    state.delete_errors.insert(forbidden.id, (403, 50013));
+    state.delete_errors.insert(archived.id, (400, 50083));
+    let fake = FakeDiscord::start(state).await;
+    let filter = Filter {
+        skip_pinned: true,
+        ..Default::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[guild_target()], filter, fast()).await;
+
+    assert_eq!(
+        (
+            summary.stats.deleted,
+            summary.stats.skipped,
+            summary.stats.failed
+        ),
+        (1, 4, 0)
+    );
+    // Pinned and system messages are never even attempted.
+    assert_eq!(fake.delete_calls(), 3);
+    let reasons: Vec<SkipReason> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Skipped { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            SkipReason::ArchivedThread,
+            SkipReason::NoPermission,
+            SkipReason::SystemMessage,
+            SkipReason::Pinned,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn searches_again_for_messages_the_index_returned_late() {
+    let mut messages: Vec<FakeMessage> =
+        (0..5).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    for minute in 5..7 {
+        messages.push(FakeMessage {
+            hidden_for_searches: 2,
+            ..FakeMessage::in_dm(minute, 0)
+        });
+    }
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+
+    let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), fast()).await;
+
+    assert_eq!(summary.stats.deleted, 7);
+    assert!(fake.remaining().is_empty());
+}
+
+#[tokio::test]
+async fn stale_search_results_do_not_cause_repeated_deletes() {
+    let messages = (0..30)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let mut state = State::with_messages(messages);
+    state.stale_index = true;
+    let fake = FakeDiscord::start(state).await;
+
+    let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), fast()).await;
+
+    assert_eq!(summary.stats.deleted, 30);
+    assert_eq!(fake.delete_calls(), 30);
+}
+
+#[tokio::test]
+async fn dry_run_deletes_nothing() {
+    let messages = (0..10)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let options = JobOptions {
+        dry_run: true,
+        ..fast()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!(summary.stats.deleted, 10);
+    assert_eq!(fake.delete_calls(), 0);
+    assert_eq!(fake.remaining().len(), 10);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Deleted { dry_run: true, .. })));
+}
+
+#[tokio::test]
+async fn a_failing_target_does_not_stop_the_others() {
+    let mut state = State::with_messages(vec![
+        FakeMessage::in_guild(0, 0, ME),
+        FakeMessage::in_dm(1, 0),
+    ]);
+    state.forbidden_guilds.push(GUILD);
+    let fake = FakeDiscord::start(state).await;
+
+    let (summary, events) = run_job(
+        &fake,
+        &[guild_target(), dm_target()],
+        Filter::default(),
+        fast(),
+    )
+    .await;
+
+    assert_eq!(summary.stats.deleted, 1);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::TargetFailed { target_id, .. } if target_id.0 == GUILD)));
+    assert_eq!(fake.remaining(), vec![id_at(0, 0)]);
+}
+
+#[tokio::test]
+async fn rejected_token_stops_the_job() {
+    let fake = FakeDiscord::start(State::with_messages(vec![FakeMessage::in_dm(0, 0)])).await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(1)
+        .mount(&fake.server)
+        .await;
+
+    let (summary, _) = run_job(
+        &fake,
+        &[dm_target(), guild_target()],
+        Filter::default(),
+        fast(),
+    )
+    .await;
+
+    assert!(summary.error.unwrap().contains("401"));
+    assert_eq!(fake.state.lock().unwrap().search_calls, 0);
+}
+
+#[tokio::test]
+async fn cancel_stops_after_the_current_message() {
+    let messages = (0..50)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let control = JobControl::new();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let options = JobOptions {
+        delete_delay_ms: 20,
+        ..fast()
+    };
+    let client = fake.client();
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            job::run(
+                &client,
+                Snowflake(ME),
+                &[dm_target()],
+                &Filter::default(),
+                &options,
+                &control,
+                tx,
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    control.cancel();
+    let summary = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(summary.cancelled);
+    assert!(summary.stats.deleted > 0 && summary.stats.deleted < 50);
+    assert_eq!(fake.remaining().len() as u64, 50 - summary.stats.deleted);
+}
+
+#[tokio::test]
+async fn pause_holds_the_job_until_resumed() {
+    let messages = (0..3).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let control = JobControl::new();
+    control.pause();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let client = fake.client();
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            job::run(
+                &client,
+                Snowflake(ME),
+                &[dm_target()],
+                &Filter::default(),
+                &fast(),
+                &control,
+                tx,
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fake.state.lock().unwrap().search_calls, 0);
+    control.resume();
+    let summary = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(summary.stats.deleted, 3);
+}
+
+#[tokio::test]
+async fn preview_counts_matching_messages_per_target() {
+    let mut messages: Vec<FakeMessage> = (0..8)
+        .map(|minute| FakeMessage::in_guild(minute, 0, ME))
+        .collect();
+    messages.extend((0..8).map(|minute| FakeMessage::in_guild(minute, 1, OTHER)));
+    messages.extend((0..4).map(|minute| FakeMessage::in_dm(minute, 2)));
+    let mut state = State::with_messages(messages);
+    state.forbidden_guilds.push(99);
+    let fake = FakeDiscord::start(state).await;
+    let forbidden = Target {
+        id: Snowflake(99),
+        ..guild_target()
+    };
+    let filter = Filter {
+        after: Some(at(2)),
+        ..Default::default()
+    };
+
+    let mut progress = Vec::new();
+    let entries = job::preview(
+        &fake.client(),
+        Snowflake(ME),
+        &[guild_target(), dm_target(), forbidden],
+        &filter,
+        &fast(),
+        &JobControl::new(),
+        |index, _| progress.push(index),
+    )
+    .await
+    .unwrap();
+
+    let counts: Vec<Option<u64>> = entries.iter().map(|e| e.count).collect();
+    assert_eq!(counts, [Some(6), Some(2), None]);
+    assert!(entries[2]
+        .error
+        .as_deref()
+        .unwrap()
+        .contains("Missing Access"));
+    assert_eq!(progress, [0, 1, 2]);
+    assert_eq!(fake.delete_calls(), 0);
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "purgecord",
+  "mainBinaryName": "purgecord-app",
+  "version": "0.1.0",
+  "identifier": "dev.purgecord.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "purgecord",
+        "width": 1040,
+        "height": 740,
+        "minWidth": 720,
+        "minHeight": 540
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: https://cdn.discordapp.com; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Utility",
+    "shortDescription": "Delete your own Discord messages",
+    "longDescription": "purgecord deletes your own Discord messages from the servers and direct messages you choose, within a time range you choose.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
