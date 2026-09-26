@@ -1,8 +1,10 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import { save } from "@tauri-apps/plugin-dialog";
-  import { api, asCommandError } from "$lib/api";
+  import { api } from "$lib/api";
+  import { errorMessage } from "$lib/errors";
   import { formatDuration, targetLabel } from "$lib/format";
+  import { i18n, num, t } from "$lib/i18n.svelte";
   import { activeMs, processed, type RunState } from "$lib/run";
   import Avatar from "./Avatar.svelte";
 
@@ -37,11 +39,11 @@
     !finished && !paused && handled >= 5 && run.expected > handled ? (elapsed / handled) * (run.expected - handled) : null,
   );
   const title = $derived.by(() => {
-    if (run.summary?.error) return "Stopped because of an error";
-    if (run.summary?.cancelled) return "Stopped";
-    if (finished) return run.dryRun ? "Dry run finished" : "Done";
-    if (paused) return "Paused";
-    return run.dryRun ? "Listing messages (dry run)…" : "Deleting…";
+    if (run.summary?.error) return t("progress.error");
+    if (run.summary?.cancelled) return t("progress.stopped");
+    if (finished) return run.dryRun ? t("progress.dryDone") : t("progress.done");
+    if (paused) return t("progress.paused");
+    return run.dryRun ? t("progress.dryRunning") : t("progress.running");
   });
 
   let logBox: HTMLDivElement | undefined = $state();
@@ -58,32 +60,32 @@
   }
 
   let exporting = $state(false);
-  let exportResult = $state<{ ok: boolean; text: string } | null>(null);
+  let exportResult = $state<{ rows: number; path: string } | { error: string } | null>(null);
 
   async function exportList() {
     exportResult = null;
     const day = new Date().toISOString().slice(0, 10);
     try {
       const path = await save({
-        title: "Save the list of messages",
+        title: t("progress.saveTitle"),
         defaultPath: `erasecord-${run.dryRun ? "dry-run" : "deleted"}-${day}.csv`,
         filters: [
-          { name: "CSV (spreadsheet)", extensions: ["csv"] },
+          { name: t("progress.csv"), extensions: ["csv"] },
           { name: "JSON", extensions: ["json"] },
         ],
       });
       if (!path) return;
       exporting = true;
       const rows = await api.exportRun(path);
-      exportResult = { ok: true, text: `Saved ${rows.toLocaleString()} message${rows === 1 ? "" : "s"} to ${path}` };
+      exportResult = { rows, path };
     } catch (err) {
-      exportResult = { ok: false, text: asCommandError(err).message };
+      exportResult = { error: errorMessage(err) };
     } finally {
       exporting = false;
     }
   }
 
-  const time = (at: number) => new Date(at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const time = (at: number) => new Date(at).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 </script>
 
 <div class="progress">
@@ -99,18 +101,18 @@
             class="btn"
             onclick={exportList}
             disabled={exporting || run.totals.deleted === 0}
-            title="Save every message of this run with its text and attachment links, as CSV or JSON"
+            title={t("progress.saveHint")}
           >
-            {#if exporting}<span class="spinner"></span>{/if} Save list…
+            {#if exporting}<span class="spinner"></span>{/if} {t("progress.saveList")}
           </button>
-          <button class="btn primary" onclick={onDone}>Start a new clean-up</button>
+          <button class="btn primary" onclick={onDone}>{t("progress.newRun")}</button>
         {:else}
           {#if paused}
-            <button class="btn" onclick={onResume}>Resume</button>
+            <button class="btn" onclick={onResume}>{t("progress.resume")}</button>
           {:else}
-            <button class="btn" onclick={onPause}>Pause</button>
+            <button class="btn" onclick={onPause}>{t("progress.pause")}</button>
           {/if}
-          <button class="btn" onclick={onStop}>Stop</button>
+          <button class="btn" onclick={onStop}>{t("progress.stop")}</button>
         {/if}
       </div>
     </div>
@@ -128,62 +130,60 @@
 
     <div class="stats">
       <div class="stat ok">
-        <span class="value num">{run.totals.deleted.toLocaleString()}</span>
-        <span class="label">{run.dryRun ? "would be deleted" : "deleted"}</span>
+        <span class="value num">{num(run.totals.deleted)}</span>
+        <span class="label">{run.dryRun ? t("progress.wouldDelete") : t("progress.deleted")}</span>
       </div>
       <div class="stat">
-        <span class="value num">{run.totals.skipped.toLocaleString()}</span>
-        <span class="label">skipped</span>
+        <span class="value num">{num(run.totals.skipped)}</span>
+        <span class="label">{t("progress.skipped")}</span>
       </div>
       <div class="stat" class:bad={run.totals.failed > 0}>
-        <span class="value num">{run.totals.failed.toLocaleString()}</span>
-        <span class="label">failed</span>
+        <span class="value num">{num(run.totals.failed)}</span>
+        <span class="label">{t("progress.failed")}</span>
       </div>
       <div class="stat time">
         <span class="value num">{formatDuration(elapsed)}</span>
         <span class="label">
-          {#if remaining !== null}about {formatDuration(remaining)} left{:else}elapsed{/if}
+          {#if remaining !== null}{t("progress.left", { time: formatDuration(remaining) })}{:else}{t("progress.elapsed")}{/if}
         </span>
       </div>
     </div>
 
-    {#if exportResult}
-      <p class="callout small" class:info={exportResult.ok} class:error={!exportResult.ok}>{exportResult.text}</p>
+    {#if exportResult && "error" in exportResult}
+      <p class="callout small error">{exportResult.error}</p>
+    {:else if exportResult}
+      <p class="callout small info">{t("progress.saved", { count: exportResult.rows, path: exportResult.path })}</p>
     {/if}
     {#if run.summary?.error}
       <p class="callout error small">{run.summary.error}</p>
     {:else if finished && run.dryRun}
-      <p class="callout info small">
-        This was a dry run: nothing was deleted. The activity log lists every message that would be deleted.
-      </p>
+      <p class="callout info small">{t("progress.dryNote")}</p>
     {/if}
   </section>
 
   <div class="columns">
-    <section class="card targets" aria-label="Servers and DMs">
+    <section class="card targets" aria-label={t("progress.targetsLabel")}>
       {#each run.targets as item (item.target.id)}
         <div class="target" class:active={item.status === "running"}>
           <Avatar name={item.target.name} url={item.target.icon_url} size={24} />
           <span class="name" title={item.error ?? undefined}>{targetLabel(item.target)}</span>
           <span class="state small num">
             {#if item.status === "pending"}
-              <span class="muted">{finished ? "not started" : "waiting"}</span>
+              <span class="muted">{finished ? t("progress.notStarted") : t("progress.waiting")}</span>
             {:else if item.status === "failed"}
-              <span class="warn">could not search</span>
+              <span class="warn">{t("progress.couldNotSearch")}</span>
             {:else}
-              {item.stats.deleted.toLocaleString()}{#if item.estimate !== null}<span class="muted"
-                  >&nbsp;/&nbsp;{item.estimate.toLocaleString()}</span
-                >{/if}
-              {#if item.status === "done"}<span class="check" aria-label="done">✓</span>{/if}
-              {#if item.status === "stopped"}<span class="muted">· stopped</span>{/if}
+              {num(item.stats.deleted)}{#if item.estimate !== null}<span class="muted">&nbsp;/&nbsp;{num(item.estimate)}</span>{/if}
+              {#if item.status === "done"}<span class="check" aria-label={t("progress.doneTag")}>✓</span>{/if}
+              {#if item.status === "stopped"}<span class="muted">· {t("progress.stoppedTag")}</span>{/if}
             {/if}
           </span>
         </div>
       {/each}
     </section>
 
-    <section class="card log" aria-label="Activity">
-      <h3>Activity</h3>
+    <section class="card log" aria-label={t("progress.activity")}>
+      <h3>{t("progress.activity")}</h3>
       <div class="lines" bind:this={logBox} onscroll={onScroll}>
         {#each run.log as line (line.id)}
           <div class="line {line.tone}">
@@ -191,7 +191,7 @@
             <span class="text">{line.text}</span>
           </div>
         {:else}
-          <p class="muted small">Starting…</p>
+          <p class="muted small">{t("common.starting")}</p>
         {/each}
       </div>
     </section>

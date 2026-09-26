@@ -1,6 +1,7 @@
 // State of a clean-up run as the UI shows it, built from the job events.
 
-import { describeNotice, describeSkip, formatDate } from "./format";
+import { describeNotice, describeSkip, formatDate, messagePreview } from "./format";
+import { t } from "./i18n.svelte";
 import type { JobEvent, Stats, Summary, Target } from "./types";
 
 export type TargetStatus = "pending" | "running" | "done" | "stopped" | "failed";
@@ -83,7 +84,7 @@ export function applyEvent(run: RunState, event: JobEvent) {
     case "target_started":
       if (progress) progress.status = "running";
       run.currentId = event.target_id;
-      log(run, "muted", `Searching ${event.name}…`);
+      log(run, "muted", t("log.searching", { name: event.name }));
       break;
     case "target_estimate":
       if (progress) progress.estimate = event.total;
@@ -91,31 +92,35 @@ export function applyEvent(run: RunState, event: JobEvent) {
     case "deleted": {
       if (progress) progress.stats.deleted++;
       run.totals.deleted++;
-      const verb = event.dry_run ? "Would delete" : "Deleted";
-      log(run, "ok", `${verb} · ${name} · ${formatDate(event.sent_at)} · ${event.preview}`);
+      const params = {
+        name,
+        date: formatDate(event.sent_at),
+        preview: messagePreview(event.content, event.attachments.length),
+      };
+      log(run, "ok", t(event.dry_run ? "log.wouldDelete" : "log.deleted", params));
       break;
     }
     case "skipped":
       if (progress) progress.stats.skipped++;
       run.totals.skipped++;
-      log(run, "muted", `Skipped (${describeSkip(event.reason)}) · ${name}`);
+      log(run, "muted", t("log.skipped", { reason: describeSkip(event.reason), name }));
       break;
     case "failed":
       if (progress) progress.stats.failed++;
       run.totals.failed++;
-      log(run, "error", `Failed · ${name} · ${event.error}`);
+      log(run, "error", t("log.failed", { name, error: event.error }));
       break;
     case "channel_unreachable":
       if (progress) progress.stats.skipped += event.messages;
       run.totals.skipped += event.messages;
-      log(run, "warn", `Skipped ${event.messages.toLocaleString()} in a channel of ${name} that is out of reach: ${event.error}`);
+      log(run, "warn", t("log.unreachable", { count: event.messages, name, error: event.error }));
       break;
     case "target_failed":
       if (progress) {
         progress.status = "failed";
         progress.error = event.error;
       }
-      log(run, "error", `Could not search ${name}: ${event.error}`);
+      log(run, "error", t("log.searchFailed", { name, error: event.error }));
       break;
     case "target_finished":
       if (progress) {
@@ -140,7 +145,13 @@ export function applyEvent(run: RunState, event: JobEvent) {
         if (current && current.status !== "failed") current.status = "stopped";
       }
       for (const t of run.targets) if (t.status === "running") t.status = "done";
-      log(run, event.error ? "error" : "muted", event.error ? `Stopped: ${event.error}` : event.cancelled ? "Stopped." : "Finished.");
+      log(
+        run,
+        event.error ? "error" : "muted",
+        event.error
+          ? t("log.stoppedError", { error: event.error })
+          : t(event.cancelled ? "log.stopped" : "log.finished"),
+      );
       break;
   }
 }
