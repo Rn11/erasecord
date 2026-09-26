@@ -318,7 +318,21 @@ pub async fn import_package(
         .await
         .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
     package.check_owner(session.me.id)?;
-    let targets = package.targets();
+    let mut targets = package.targets();
+    // The package knows the people in a DM only by ID; open conversations
+    // lend their current names and pictures. Best effort: a failure here
+    // leaves the package's names.
+    match session.client.private_channels().await {
+        Ok(channels) => {
+            let live: Vec<Target> = channels
+                .into_iter()
+                .filter_map(Target::from_channel)
+                .collect();
+            erasecord_core::package::apply_live_names(&mut targets, &live);
+        }
+        Err(Error::Unauthorized) => return Err(Error::Unauthorized.into()),
+        Err(_) => {}
+    }
     let member_of: Vec<Snowflake> = session
         .client
         .guilds()

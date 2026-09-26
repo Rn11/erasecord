@@ -294,6 +294,24 @@ impl Package {
     }
 }
 
+/// Gives the package's DMs and group DMs the names and pictures they have
+/// now, taken from `live` (the open conversations, see
+/// [`Target::from_channel`]). The package only knows the other people by ID,
+/// so a group DM without a name would otherwise show up as "Unnamed group".
+/// Conversations that are no longer open keep the name from the package.
+pub fn apply_live_names(targets: &mut [PackageTarget], live: &[Target]) {
+    for item in targets {
+        let target = &mut item.target;
+        if target.kind == TargetKind::Guild {
+            continue;
+        }
+        if let Some(current) = live.iter().find(|t| t.id == target.id) {
+            target.name.clone_from(&current.name);
+            target.icon_url.clone_from(&current.icon_url);
+        }
+    }
+}
+
 #[derive(Default)]
 struct ChannelFiles {
     channel: Option<Vec<u8>>,
@@ -653,6 +671,68 @@ mod tests {
             .unwrap()
             .check_owner(Snowflake(7))
             .is_ok());
+    }
+
+    #[test]
+    fn open_conversations_lend_their_names() {
+        let package = Package::from_files(vec![
+            file(
+                "messages/index.json",
+                r#"{"300": null, "100": "Direct Message with bob#0"}"#,
+            ),
+            file(
+                "messages/c300/channel.json",
+                r#"{"id": "300", "type": 3, "recipients": ["1", "2", "3"]}"#,
+            ),
+            file(
+                "messages/c300/messages.csv",
+                "ID,Timestamp,Contents,Attachments\n5,x,hi,\n",
+            ),
+            file("messages/c100/channel.json", r#"{"id": "100", "type": 1}"#),
+            file(
+                "messages/c100/messages.csv",
+                "ID,Timestamp,Contents,Attachments\n6,x,yo,\n",
+            ),
+            // A group DM that is no longer open keeps its package name.
+            file("messages/c400/channel.json", r#"{"id": "400", "type": 3}"#),
+            file(
+                "messages/c400/messages.csv",
+                "ID,Timestamp,Contents,Attachments\n7,x,old,\n",
+            ),
+        ])
+        .unwrap();
+        let mut targets = package.targets();
+        let name = |targets: &[PackageTarget], id: u64| {
+            targets
+                .iter()
+                .find(|t| t.target.id.0 == id)
+                .unwrap()
+                .target
+                .name
+                .clone()
+        };
+        assert_eq!(name(&targets, 300), "Unnamed group");
+
+        let live = |id: u64, name: &str, icon: Option<&str>| Target {
+            kind: TargetKind::Dm,
+            id: Snowflake(id),
+            name: name.into(),
+            icon_url: icon.map(str::to_owned),
+            channels: Vec::new(),
+        };
+        apply_live_names(
+            &mut targets,
+            &[
+                live(300, "Ann, Bob, Cy", None),
+                live(100, "Bob", Some("https://cdn/bob.png")),
+            ],
+        );
+
+        assert_eq!(name(&targets, 300), "Ann, Bob, Cy");
+        assert_eq!(name(&targets, 100), "Bob");
+        assert_eq!(name(&targets, 400), "Unnamed group");
+        let bob = targets.iter().find(|t| t.target.id.0 == 100).unwrap();
+        assert_eq!(bob.target.icon_url.as_deref(), Some("https://cdn/bob.png"));
     }
 
     #[test]
