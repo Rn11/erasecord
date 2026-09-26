@@ -23,7 +23,7 @@ want. Open source, for Windows, macOS and Linux, as a desktop app and as a comma
 
 ## Install
 
-Download the installer for your system from the [releases page](https://github.com/Rn11/EraseCord/releases):
+Download the installer for your system from the [releases page](https://github.com/Rn11/erasecord/releases):
 `.msi`/`.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
 attached to every release as a single binary.
 
