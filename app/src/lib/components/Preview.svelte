@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { checksLocally, describeFilter, plural, targetLabel } from "$lib/format";
+  import { checksLocally, describePlaces, filterLines, targetLabel } from "$lib/format";
+  import { num, t } from "$lib/i18n.svelte";
   import type { Filter, PreviewEntry, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -32,16 +33,15 @@
   const total = $derived(entries.reduce((sum, e) => sum + (e.count ?? 0), 0));
   const withMatches = $derived(entries.filter((e) => (e.count ?? 0) > 0));
   const places = $derived(
-    [
-      plural(withMatches.filter((e) => e.target.kind === "guild").length, "server"),
-      plural(withMatches.filter((e) => e.target.kind !== "guild").length, "DM"),
-    ]
-      .filter((text) => !text.startsWith("0 "))
-      .join(" and "),
+    describePlaces(
+      withMatches.filter((e) => e.target.kind === "guild").length,
+      withMatches.filter((e) => e.target.kind !== "guild").length,
+    ),
   );
+  const conditions = $derived(filterLines(filter));
   const failures = $derived(entries.filter((e) => e.error).length);
   const approximate = $derived(!exact && checksLocally(filter));
-  const upTo = $derived(approximate || filter.skip_pinned ? "up to " : "");
+  const upTo = $derived(approximate || filter.skip_pinned);
 
   function confirmDelete() {
     dialog?.close();
@@ -52,11 +52,14 @@
 <section class="card preview">
   <header>
     <div>
-      <h2>{counting ? "Counting your messages…" : "Preview"}</h2>
-      <p class="muted">Your messages {describeFilter(filter)}.</p>
+      <h2>{counting ? t("preview.counting") : t("preview.title")}</h2>
+      <p class="muted">{t("preview.intro")}</p>
+      <ul class="conditions muted small">
+        {#each conditions as line, i (i)}<li>{line}</li>{/each}
+      </ul>
     </div>
     {#if counting}
-      <span class="muted small num">{entries.length} / {targets.length}</span>
+      <span class="muted small num">{num(entries.length)} / {num(targets.length)}</span>
     {/if}
   </header>
 
@@ -70,9 +73,9 @@
           {#if !entry}
             {#if counting}<span class="spinner muted"></span>{/if}
           {:else if entry.error}
-            <span class="failed" title={entry.error}>could not search</span>
+            <span class="failed" title={entry.error}>{t("preview.couldNotSearch")}</span>
           {:else}
-            <span class:zero={entry.count === 0}>{(entry.count ?? 0).toLocaleString()}</span>
+            <span class:zero={entry.count === 0}>{num(entry.count ?? 0)}</span>
           {/if}
         </span>
       </div>
@@ -80,60 +83,50 @@
   </div>
 
   <div class="total">
-    <span>Total</span>
-    <span class="num">{total.toLocaleString()}</span>
+    <span>{t("preview.total")}</span>
+    <span class="num">{num(total)}</span>
   </div>
 
   {#if error}
     <p class="callout error small">{error}</p>
   {/if}
   {#if !counting && failures > 0}
-    <p class="callout warn small">
-      {plural(failures, "place")} could not be searched, usually because you no longer have access. EraseCord tries again
-      when you start.
-    </p>
+    <p class="callout warn small">{t("preview.failures", { count: failures })}</p>
   {/if}
   {#if !counting && filter.skip_pinned && total > 0}
-    <p class="small muted">Pinned messages are included in these numbers and will be kept.</p>
+    <p class="small muted">{t("preview.pinnedNote")}</p>
   {/if}
   {#if !counting && exact && total > 0}
-    <p class="small muted">
-      Counted from your data package. Messages deleted since you requested it are included and are counted as deleted
-      when EraseCord gets to them.
-    </p>
+    <p class="small muted">{t("preview.packageNote")}</p>
   {/if}
   {#if !counting && approximate && total > 0}
-    <p class="small muted">
-      The regular expression and “keep messages with” are checked while deleting, so fewer messages may be deleted than
-      counted here. A dry run shows exactly which ones.
-    </p>
+    <p class="small muted">{t("preview.approxNote")}</p>
   {/if}
 
   <footer>
     {#if counting}
-      <button class="btn" onclick={onCancel}>Cancel</button>
+      <button class="btn" onclick={onCancel}>{t("common.cancel")}</button>
     {:else}
-      <button class="btn" onclick={onBack}>Back</button>
+      <button class="btn" onclick={onBack}>{t("common.back")}</button>
       <span class="spacer"></span>
-      <button class="btn" onclick={() => onStart(true)} disabled={total === 0}>List them first (dry run)</button>
+      <button class="btn" onclick={() => onStart(true)} disabled={total === 0}>{t("preview.dryRun")}</button>
       <button class="btn danger" onclick={() => dialog?.showModal()} disabled={total === 0}>
-        {total === 0 ? "Nothing to delete" : `Delete ${upTo}${plural(total, "message")}`}
+        {total === 0 ? t("preview.nothing") : t(upTo ? "preview.deleteUpTo" : "preview.delete", { count: total })}
       </button>
     {/if}
   </footer>
 </section>
 
 <dialog bind:this={dialog} class="card confirm" aria-labelledby="confirm-title">
-  <h2 id="confirm-title">Delete {upTo}{plural(total, "message")}?</h2>
-  <p>
-    Your messages {describeFilter(filter)} will be deleted from {places}. <strong>This cannot be undone.</strong>
-  </p>
-  <p class="muted small">
-    This can take a while: EraseCord deletes one message at a time. You can pause or stop at any point.
-  </p>
+  <h2 id="confirm-title">{t(upTo ? "confirm.titleUpTo" : "confirm.title", { count: total })}</h2>
+  <ul class="conditions small">
+    {#each conditions as line, i (i)}<li>{line}</li>{/each}
+  </ul>
+  <p>{t("confirm.body", { places })} <strong>{t("confirm.undo")}</strong></p>
+  <p class="muted small">{t("confirm.slow")}</p>
   <div class="actions">
-    <button class="btn" onclick={() => dialog?.close()}>Cancel</button>
-    <button class="btn danger" onclick={confirmDelete}>Delete permanently</button>
+    <button class="btn" onclick={() => dialog?.close()}>{t("common.cancel")}</button>
+    <button class="btn danger" onclick={confirmDelete}>{t("confirm.go")}</button>
   </div>
 </dialog>
 
@@ -157,6 +150,11 @@
   header div {
     display: grid;
     gap: 4px;
+  }
+
+  .conditions {
+    margin: 0;
+    padding-left: 18px;
   }
 
   .table {

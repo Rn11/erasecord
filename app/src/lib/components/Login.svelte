@@ -1,6 +1,9 @@
 <script lang="ts">
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import { api, asCommandError } from "$lib/api";
+  import { api } from "$lib/api";
+  import { errorMessage } from "$lib/errors";
+  import { t } from "$lib/i18n.svelte";
+  import LanguagePicker from "./LanguagePicker.svelte";
   import type { User } from "$lib/types";
 
   let { notice = null, onLogin }: { notice?: string | null; onLogin: (user: User, rememberError: string | null) => void } =
@@ -25,7 +28,7 @@
       token = "";
       onLogin(result.user, result.remember_error);
     } catch (err) {
-      error = asCommandError(err).message;
+      error = errorMessage(err);
     } finally {
       busy = false;
     }
@@ -35,8 +38,11 @@
 <div class="wrap">
   <form class="card login" onsubmit={submit}>
     <header>
-      <h1>EraseCord</h1>
-      <p class="muted">Delete your own Discord messages from the servers and DMs you choose.</p>
+      <div class="title-row">
+        <h1>EraseCord</h1>
+        <LanguagePicker />
+      </div>
+      <p class="muted">{t("login.tagline")}</p>
     </header>
 
     {#if notice}
@@ -44,37 +50,33 @@
     {/if}
 
     <div class="callout warn small risk">
-      <strong>Before you start</strong>
-      <p>
-        EraseCord logs in with your user token. Automating a user account is against Discord's Terms of Service, so
-        Discord could limit or ban your account. EraseCord only deletes, sends one request at a time and waits
-        whenever Discord asks it to, but the risk does not go away. Deleted messages cannot be restored.
-      </p>
+      <strong>{t("login.riskTitle")}</strong>
+      <p>{t("login.riskText")}</p>
       <label class="check">
         <input type="checkbox" bind:checked={acknowledged} />
-        <span>I understand the risk and want to continue</span>
+        <span>{t("login.acknowledge")}</span>
       </label>
     </div>
 
     <label class="field">
-      <span>Discord token</span>
+      <span>{t("login.token")}</span>
       <div class="token-row">
         <input
           type={reveal ? "text" : "password"}
           bind:value={token}
           autocomplete="off"
           spellcheck="false"
-          placeholder="Paste your token"
+          placeholder={t("login.tokenPlaceholder")}
         />
         <button type="button" class="btn ghost small" onclick={() => (reveal = !reveal)}>
-          {reveal ? "Hide" : "Show"}
+          {reveal ? t("login.hide") : t("login.show")}
         </button>
       </div>
     </label>
 
     <label class="check">
       <input type="checkbox" bind:checked={remember} />
-      <span>Remember on this device <span class="muted">(stored in the system's credential store)</span></span>
+      <span>{t("login.remember")} <span class="muted">{t("login.rememberHint")}</span></span>
     </label>
 
     {#if error}
@@ -82,24 +84,19 @@
     {/if}
 
     <button class="btn primary submit" type="submit" disabled={!canSubmit}>
-      {#if busy}<span class="spinner"></span> Checking token…{:else}Log in{/if}
+      {#if busy}<span class="spinner"></span> {t("login.checking")}{:else}{t("login.submit")}{/if}
     </button>
 
     <details class="help small">
-      <summary>How do I find my token?</summary>
+      <summary>{t("login.helpTitle")}</summary>
       <ol>
-        <li>
-          Open <button type="button" class="link" onclick={() => openUrl("https://discord.com/app")}>discord.com/app</button>
-          in your browser and log in.
-        </li>
-        <li>Open the developer tools (<kbd>F12</kbd>, or <kbd>⌥</kbd><kbd>⌘</kbd><kbd>I</kbd> on macOS) and switch to the <em>Network</em> tab.</li>
-        <li>Type <code>api</code> into the filter box, then click on any channel so requests show up.</li>
-        <li>Select one of the requests. Under <em>Request Headers</em>, the value of <code>authorization</code> is your token.</li>
+        <li>{t("login.help1")}</li>
+        <li>{t("login.help2")}</li>
+        <li>{t("login.help3")}</li>
+        <li>{t("login.help4")}</li>
       </ol>
-      <p class="muted">
-        Your token gives full access to your account: never share it. EraseCord sends it only to discord.com.
-        Changing your password makes the token invalid.
-      </p>
+      <button type="button" class="btn small" onclick={() => openUrl("https://discord.com/app")}>{t("login.openDiscord")}</button>
+      <p class="muted">{t("login.helpNote")}</p>
     </details>
   </form>
 </div>
@@ -127,6 +124,18 @@
   h1 {
     font-size: 24px;
     letter-spacing: -0.01em;
+  }
+
+  .title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .help .btn {
+    margin: 4px 0 8px;
   }
 
   .risk {
@@ -175,25 +184,5 @@
     padding-left: 20px;
     display: grid;
     gap: 6px;
-  }
-
-  .link {
-    background: none;
-    border: none;
-    padding: 0;
-    font: inherit;
-    color: var(--accent);
-    text-decoration: underline;
-    cursor: pointer;
-  }
-
-  kbd,
-  code {
-    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    font-size: 12px;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0 4px;
   }
 </style>

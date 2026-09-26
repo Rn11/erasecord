@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
 use erasecord_core::{
-    Client, ClientConfig, Error, Friend, GuildChannel, Package, PackageTarget, Snowflake, Target,
-    TargetKind, User,
+    Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
+    PackageTarget, Snowflake, Target, TargetKind, User,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -42,6 +42,13 @@ impl CommandError {
         CommandError {
             kind: ErrorKind::NotLoggedIn,
             message: "not logged in".into(),
+        }
+    }
+
+    fn other(message: String) -> Self {
+        CommandError {
+            kind: ErrorKind::Other,
+            message,
         }
     }
 
@@ -240,6 +247,7 @@ fn spawn_job(
 ) -> CommandResult<()> {
     let session = state.session()?;
     let control = state.begin_job()?;
+    state.clear_last_run();
     tauri::async_runtime::spawn(async move {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (client, me) = (&session.client, session.me.id);
@@ -256,6 +264,7 @@ fn spawn_job(
         };
         let forward = async {
             while let Some(event) = rx.recv().await {
+                app.state::<AppState>().record(&event);
                 if matches!(event, Event::Finished(_)) {
                     // Free the slot before the UI hears about it, so it can
                     // start the next run right away.
@@ -267,6 +276,26 @@ fn spawn_job(
         tokio::join!(run, forward);
     });
     Ok(())
+}
+
+/// Saves what the last clean-up deleted (or would delete) to `path`: JSON
+/// for a .json file, CSV otherwise. Returns the number of messages.
+#[tauri::command]
+pub async fn export_run(state: State<'_, AppState>, path: PathBuf) -> CommandResult<u64> {
+    let events = state.last_run();
+    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        let mut writer = ExportWriter::new(file, ExportFormat::for_path(&path))?;
+        for event in &events {
+            writer.observe(event)?;
+        }
+        let rows = writer.rows();
+        writer.finish()?;
+        Ok(rows)
+    })
+    .await
+    .map_err(|err| CommandError::other(err.to_string()))?
+    .map_err(|err| CommandError::other(format!("could not save the file: {err}")))
 }
 
 #[derive(Serialize)]
@@ -289,7 +318,21 @@ pub async fn import_package(
         .await
         .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
     package.check_owner(session.me.id)?;
-    let targets = package.targets();
+    let mut targets = package.targets();
+    // The package knows the people in a DM only by ID; open conversations
+    // lend their current names and pictures. Best effort: a failure here
+    // leaves the package's names.
+    match session.client.private_channels().await {
+        Ok(channels) => {
+            let live: Vec<Target> = channels
+                .into_iter()
+                .filter_map(Target::from_channel)
+                .collect();
+            erasecord_core::package::apply_live_names(&mut targets, &live);
+        }
+        Err(Error::Unauthorized) => return Err(Error::Unauthorized.into()),
+        Err(_) => {}
+    }
     let member_of: Vec<Snowflake> = session
         .client
         .guilds()

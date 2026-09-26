@@ -3,13 +3,15 @@
   import {
     HAS_KINDS,
     contentProblem,
-    describeFilter,
-    plural,
+    describePlaces,
+    filterLines,
+    hasLabel,
     rangeProblem,
     toFilter,
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
+  import { num, t } from "$lib/i18n.svelte";
   import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -80,7 +82,7 @@
   const selectedServers = $derived(servers.filter((t) => selected.has(t.id)).length);
   const selectedDms = $derived(dms.filter((t) => selected.has(t.id)).length);
   const problem = $derived(rangeProblem(range) ?? contentProblem(content));
-  const summary = $derived(problem ? null : describeFilter(toFilter(range, skipPinned, content)));
+  const summary = $derived(problem ? [] : filterLines(toFilter(range, skipPinned, content)));
   const contentActive = $derived(
     !!content.contains.trim() || !!content.pattern.trim() || content.has.length > 0 || content.without.length > 0,
   );
@@ -94,7 +96,7 @@
   const packageCounts = $derived(new Map((pkg?.targets ?? []).map((t) => [t.target.id, t.messages])));
   const left = $derived(new Set(pkg?.left_servers ?? []));
   // The data package cannot tell embeds and stickers apart.
-  const kinds = $derived(pkg ? HAS_KINDS.filter((k) => k.value !== "embed" && k.value !== "sticker") : HAS_KINDS);
+  const kinds = $derived(pkg ? HAS_KINDS.filter((k) => k !== "embed" && k !== "sticker") : HAS_KINDS);
 
   function toggle(id: string) {
     if (selected.has(id)) {
@@ -156,51 +158,61 @@
 </script>
 
 <div class="setup">
-  <section class="card picker" aria-label="Servers and direct messages">
+  <section class="card picker" aria-label={t("setup.pickerLabel")}>
     <div class="source small" class:package={pkg}>
       {#if pkg}
-        <span><strong>Data package</strong> · {plural(pkg.messages, "message")} in {plural(pkg.targets.length, "place")}</span>
-        <button class="link" onclick={onClosePackage}>Back to live search</button>
+        <span>
+          <strong>{t("setup.dataPackage")}</strong> ·
+          {t("setup.packageSummary", {
+            messages: t("count.message", { count: pkg.messages }),
+            places: t("count.place", { count: pkg.targets.length }),
+          })}
+        </span>
+        <button class="link" onclick={onClosePackage}>{t("setup.backToLive")}</button>
       {:else if importing}
-        <span class="muted"><span class="spinner"></span> Reading the data package…</span>
+        <span class="muted"><span class="spinner"></span> {t("setup.readingPackage")}</span>
       {:else}
-        <span class="muted">Searching your servers and open DMs.</span>
+        <span class="muted">{t("setup.liveSource")}</span>
         <span class="import">
-          <button class="link" onclick={() => onImport(false)}>Import data package…</button>
-          <button class="link muted" onclick={() => onImport(true)} title="Pick the extracted folder instead of the .zip file">(folder)</button>
+          <button class="link" onclick={() => onImport(false)}>{t("setup.importPackage")}</button>
+          <button class="link muted" onclick={() => onImport(true)} title={t("setup.importFolderHint")}>
+            {t("setup.importFolder")}
+          </button>
         </span>
       {/if}
     </div>
     {#if importError}<p class="small problem source-error">{importError}</p>{/if}
     <div class="tabs" role="tablist">
       <button role="tab" aria-selected={tab === "servers"} class:active={tab === "servers"} onclick={() => (tab = "servers")}>
-        Servers <span class="count">{selectedServers ? `${selectedServers}/` : ""}{servers.length}</span>
+        {t("setup.tabServers")} <span class="count">{selectedServers ? `${num(selectedServers)}/` : ""}{num(servers.length)}</span>
       </button>
       <button role="tab" aria-selected={tab === "dms"} class:active={tab === "dms"} onclick={() => (tab = "dms")}>
-        Direct messages <span class="count">{selectedDms ? `${selectedDms}/` : ""}{dms.length}</span>
+        {t("setup.tabDms")} <span class="count">{selectedDms ? `${num(selectedDms)}/` : ""}{num(dms.length)}</span>
       </button>
     </div>
 
     <div class="toolbar">
-      <input type="search" placeholder="Filter by name" bind:value={query} aria-label="Filter by name" />
+      <input type="search" placeholder={t("setup.filterByName")} bind:value={query} aria-label={t("setup.filterByName")} />
       <button class="btn small" onclick={toggleVisible} disabled={visible.length === 0}>
-        {allVisibleSelected ? "Select none" : "Select all"}
+        {allVisibleSelected ? t("setup.selectNone") : t("setup.selectAll")}
       </button>
       {#if !pkg}
-        <button class="btn small ghost" onclick={onReload} disabled={loading} title="Reload list">↻</button>
+        <button class="btn small ghost" onclick={onReload} disabled={loading} title={t("setup.reload")} aria-label={t("setup.reload")}>↻</button>
       {/if}
     </div>
 
     <div class="list">
       {#if loading && targets.length === 0}
-        <p class="empty muted"><span class="spinner"></span> Loading your servers and DMs…</p>
+        <p class="empty muted"><span class="spinner"></span> {t("setup.loadingTargets")}</p>
       {:else if error}
         <div class="empty">
           <p class="callout error small">{error}</p>
-          <button class="btn small" onclick={onReload}>Try again</button>
+          <button class="btn small" onclick={onReload}>{t("common.tryAgain")}</button>
         </div>
       {:else if visible.length === 0}
-        <p class="empty muted">{query ? "Nothing matches your filter." : tab === "servers" ? "You are not in any server." : "No open DMs."}</p>
+        <p class="empty muted">
+          {query ? t("setup.noMatch") : tab === "servers" ? t("setup.noServers") : t("setup.noDms")}
+        </p>
       {:else}
         {#each visible as target (target.id)}
           {@const picks = channelPicks.get(target.id) ?? []}
@@ -208,22 +220,22 @@
             <input type="checkbox" checked={selected.has(target.id)} onchange={() => toggle(target.id)} />
             <Avatar name={target.name} url={target.icon_url} size={28} />
             <span class="name">{target.name}</span>
-            {#if target.kind === "group_dm"}<span class="tag">group</span>{/if}
-            {#if left.has(target.id)}<span class="tag warn" title="You are no longer a member; deleting will likely fail">left</span>{/if}
-            {#if pkg}<span class="muted small num">{(packageCounts.get(target.id) ?? 0).toLocaleString()}</span>{/if}
-            {#if picks.length}<span class="tag picked">{plural(picks.length, "channel")}</span>{/if}
+            {#if target.kind === "group_dm"}<span class="tag">{t("setup.tagGroup")}</span>{/if}
+            {#if left.has(target.id)}<span class="tag warn" title={t("setup.leftHint")}>{t("setup.tagLeft")}</span>{/if}
+            {#if pkg}<span class="muted small num">{num(packageCounts.get(target.id) ?? 0)}</span>{/if}
+            {#if picks.length}<span class="tag picked">{t("count.channel", { count: picks.length })}</span>{/if}
             {#if target.kind === "guild"}
               <button
                 type="button"
                 class="btn ghost small expand"
                 aria-expanded={expanded.has(target.id)}
-                title="Pick single channels"
+                title={t("setup.channelsHint")}
                 onclick={(event) => {
                   event.preventDefault();
                   toggleExpanded(target.id);
                 }}
               >
-                Channels <span class="chevron" class:open={expanded.has(target.id)}>▾</span>
+                {t("setup.channels")} <span class="chevron" class:open={expanded.has(target.id)}>▾</span>
               </button>
             {/if}
           </label>
@@ -231,15 +243,13 @@
             {@const list = channelLists.get(target.id)}
             <div class="channels">
               {#if !list || list.loading}
-                <p class="small muted"><span class="spinner"></span> Loading channels…</p>
+                <p class="small muted"><span class="spinner"></span> {t("setup.loadingChannels")}</p>
               {:else if list.error}
                 <p class="small problem">{list.error}</p>
               {:else if list.channels.length === 0}
-                <p class="small muted">No channels you can see.</p>
+                <p class="small muted">{t("setup.noChannels")}</p>
               {:else}
-                <p class="small muted">
-                  {picks.length ? "Only the ticked channels are cleaned up." : "Tick channels to clean up only those; otherwise the whole server is."}
-                </p>
+                <p class="small muted">{picks.length ? t("setup.onlyTicked") : t("setup.tickChannels")}</p>
                 {#each grouped(list.channels) as group, i (i)}
                   {#if group.category}<div class="category small">{group.category}</div>{/if}
                   {#each group.channels as channel (channel.id)}
@@ -251,12 +261,12 @@
                       />
                       <span class="icon muted" aria-hidden="true">{channelIcon(channel.kind)}</span>
                       <span class="name">{channel.name}</span>
-                      {#if channel.messages !== undefined}<span class="muted small num">{channel.messages.toLocaleString()}</span>{/if}
+                      {#if channel.messages !== undefined}<span class="muted small num">{num(channel.messages)}</span>{/if}
                     </label>
                   {/each}
                 {/each}
                 {#if !pkg}
-                  <p class="small muted">Threads and forum posts are only included when the whole server is selected.</p>
+                  <p class="small muted">{t("setup.threadsNote")}</p>
                 {/if}
               {/if}
             </div>
@@ -265,21 +275,21 @@
       {/if}
     </div>
     {#if tab === "dms" && pkg}
-      <p class="closed small muted">The data package includes closed DMs too.</p>
+      <p class="closed small muted">{t("setup.packageClosedDms")}</p>
     {:else if tab === "dms"}
       <div class="closed">
         {#if friends === null}
-          <p class="small muted">Only open DMs are listed.</p>
+          <p class="small muted">{t("setup.onlyOpenDms")}</p>
           <button class="btn small" onclick={onLoadFriends} disabled={friendsLoading}>
-            {#if friendsLoading}<span class="spinner"></span>{/if} Find friends without an open DM
+            {#if friendsLoading}<span class="spinner"></span>{/if} {t("setup.findFriends")}
           </button>
         {:else}
           <div class="closed-head small">
-            <strong>Friends without an open DM</strong>
-            <span class="muted">Ticking one reopens the conversation in your DM list; they are not notified.</span>
+            <strong>{t("setup.friendsTitle")}</strong>
+            <span class="muted">{t("setup.friendsHint")}</span>
           </div>
           {#if visibleFriends.length === 0}
-            <p class="small muted">{friends.length ? "Nothing matches your filter." : "Every friend's DM is open already."}</p>
+            <p class="small muted">{friends.length ? t("setup.noMatch") : t("setup.allFriendsOpen")}</p>
           {:else}
             <div class="friends">
               {#each visibleFriends as friend (friend.user_id)}
@@ -301,14 +311,14 @@
     {/if}
   </section>
 
-  <section class="card options" aria-label="What to delete">
-    <h2>What to delete</h2>
+  <section class="card options" aria-label={t("setup.whatToDelete")}>
+    <h2>{t("setup.whatToDelete")}</h2>
 
     <fieldset>
-      <legend>Time range</legend>
+      <legend>{t("setup.timeRange")}</legend>
       <label class="choice">
         <input type="radio" name="range" value="older_than" bind:group={range.mode} />
-        <span>Messages older than</span>
+        <span>{t("setup.olderThan")}</span>
       </label>
       <div class="indent inline" class:disabled={range.mode !== "older_than"}>
         <input
@@ -317,85 +327,87 @@
           step="1"
           bind:value={range.amount}
           disabled={range.mode !== "older_than"}
-          aria-label="Amount"
+          aria-label={t("setup.amount")}
         />
-        <select bind:value={range.unit} disabled={range.mode !== "older_than"} aria-label="Unit">
-          <option value="days">days</option>
-          <option value="weeks">weeks</option>
-          <option value="months">months</option>
-          <option value="years">years</option>
+        <select bind:value={range.unit} disabled={range.mode !== "older_than"} aria-label={t("setup.unit")}>
+          <option value="days">{t("setup.days")}</option>
+          <option value="weeks">{t("setup.weeks")}</option>
+          <option value="months">{t("setup.months")}</option>
+          <option value="years">{t("setup.years")}</option>
         </select>
       </div>
 
       <label class="choice">
         <input type="radio" name="range" value="between" bind:group={range.mode} />
-        <span>Messages sent between</span>
+        <span>{t("setup.between")}</span>
       </label>
       <div class="indent dates" class:disabled={range.mode !== "between"}>
-        <input type="date" bind:value={range.from} disabled={range.mode !== "between"} aria-label="From" />
-        <span class="muted">and</span>
-        <input type="date" bind:value={range.to} disabled={range.mode !== "between"} aria-label="To (inclusive)" />
+        <input type="date" bind:value={range.from} disabled={range.mode !== "between"} aria-label={t("setup.from")} />
+        <span class="muted">{t("setup.and")}</span>
+        <input type="date" bind:value={range.to} disabled={range.mode !== "between"} aria-label={t("setup.to")} />
       </div>
 
       <label class="choice">
         <input type="radio" name="range" value="all" bind:group={range.mode} />
-        <span>All my messages</span>
+        <span>{t("setup.allMessages")}</span>
       </label>
     </fieldset>
 
     <fieldset>
       <legend>
-        Content
+        {t("setup.content")}
         {#if contentActive}
           <button type="button" class="link small" onclick={() => (content = { contains: "", pattern: "", has: [], without: [] })}>
-            reset
+            {t("setup.reset")}
           </button>
         {/if}
       </legend>
       <label class="field">
-        <span class="small muted">Containing all of these words</span>
-        <input type="text" placeholder="Any text" bind:value={content.contains} spellcheck="false" />
+        <span class="small muted">{t("setup.containing")}</span>
+        <input type="text" placeholder={t("setup.anyText")} bind:value={content.contains} spellcheck="false" />
       </label>
       <div class="field">
-        <span class="small muted">Only messages with</span>
-        <div class="chips" role="group" aria-label="Only messages with">
-          {#each kinds as kind (kind.value)}
-            <label class="chip" class:on={content.has.includes(kind.value)}>
-              <input type="checkbox" checked={content.has.includes(kind.value)} onchange={() => toggleKind("has", kind.value)} />
-              {kind.label}
+        <span class="small muted">{t("setup.onlyWith")}</span>
+        <div class="chips" role="group" aria-label={t("setup.onlyWith")}>
+          {#each kinds as kind (kind)}
+            <label class="chip" class:on={content.has.includes(kind)}>
+              <input type="checkbox" checked={content.has.includes(kind)} onchange={() => toggleKind("has", kind)} />
+              {hasLabel(kind)}
             </label>
           {/each}
         </div>
       </div>
       <div class="field">
-        <span class="small muted">Keep messages with</span>
-        <div class="chips" role="group" aria-label="Keep messages with">
-          {#each kinds as kind (kind.value)}
-            <label class="chip keep" class:on={content.without.includes(kind.value)}>
-              <input
-                type="checkbox"
-                checked={content.without.includes(kind.value)}
-                onchange={() => toggleKind("without", kind.value)}
-              />
-              {kind.label}
+        <span class="small muted">{t("setup.keepWith")}</span>
+        <div class="chips" role="group" aria-label={t("setup.keepWith")}>
+          {#each kinds as kind (kind)}
+            <label class="chip keep" class:on={content.without.includes(kind)}>
+              <input type="checkbox" checked={content.without.includes(kind)} onchange={() => toggleKind("without", kind)} />
+              {hasLabel(kind)}
             </label>
           {/each}
         </div>
       </div>
       <details open={!!content.pattern}>
-        <summary class="small">Regular expression</summary>
+        <summary class="small">{t("setup.regex")}</summary>
         <label class="field regex">
-          <input type="text" placeholder="e.g. ^(lol|ok)$" bind:value={content.pattern} spellcheck="false" aria-label="Regular expression" />
-          <span class="small muted">Case-insensitive. Checked by EraseCord while deleting, so counts can be too high.</span>
+          <input
+            type="text"
+            placeholder={t("setup.regexPlaceholder")}
+            bind:value={content.pattern}
+            spellcheck="false"
+            aria-label={t("setup.regex")}
+          />
+          <span class="small muted">{t("setup.regexHint")}</span>
         </label>
       </details>
     </fieldset>
 
     <fieldset>
-      <legend>Options</legend>
+      <legend>{t("setup.options")}</legend>
       <label class="choice">
         <input type="checkbox" bind:checked={skipPinned} />
-        <span>Keep pinned messages</span>
+        <span>{t("setup.keepPinned")}</span>
       </label>
       <label class="choice">
         <input
@@ -403,49 +415,48 @@
           checked={options.overwrite !== null}
           onchange={(event) => (options.overwrite = event.currentTarget.checked ? "" : null)}
         />
-        <span>Overwrite messages before deleting them</span>
+        <span>{t("setup.overwrite")}</span>
       </label>
       {#if options.overwrite !== null}
         <div class="indent field">
-          <input type="text" placeholder="Random letters" bind:value={options.overwrite} aria-label="Replacement text" />
-          <span class="small muted">
-            Each message is edited to this text and loses its attachments, then deleted. Takes about twice as long.
-          </span>
+          <input
+            type="text"
+            placeholder={t("setup.overwritePlaceholder")}
+            bind:value={options.overwrite}
+            aria-label={t("setup.overwriteLabel")}
+          />
+          <span class="small muted">{t("setup.overwriteHint")}</span>
         </div>
       {/if}
     </fieldset>
 
     <details>
-      <summary class="small">Speed</summary>
+      <summary class="small">{t("setup.speed")}</summary>
       <div class="speed small">
         <label>
-          <span>Pause after each deletion</span>
+          <span>{t("setup.deleteDelay")}</span>
           <span class="unit"><input type="number" min="0" step="100" bind:value={options.delete_delay_ms} /> ms</span>
         </label>
         <label>
-          <span>Pause between searches</span>
+          <span>{t("setup.searchDelay")}</span>
           <span class="unit"><input type="number" min="0" step="500" bind:value={options.search_delay_ms} /> ms</span>
         </label>
-        <p class="muted">Shorter pauses are faster but make rate limits, and attention from Discord, more likely.</p>
+        <p class="muted">{t("setup.speedHint")}</p>
       </div>
     </details>
 
     <div class="footer">
       {#if problem}
         <p class="small problem">{problem}</p>
+      {:else if selected.size === 0}
+        <p class="small muted">{t("setup.selectSomething")}</p>
       {:else}
-        <p class="small muted">
-          {#if selected.size === 0}
-            Select at least one server or DM.
-          {:else}
-            Your messages {summary} in
-            {[selectedServers ? plural(selectedServers, "server") : "", selectedDms ? plural(selectedDms, "DM") : ""]
-              .filter(Boolean)
-              .join(" and ")}.
-          {/if}
-        </p>
+        <ul class="summary small muted">
+          {#each summary as line, i (i)}<li>{line}</li>{/each}
+          <li>{t("filter.in", { places: describePlaces(selectedServers, selectedDms) })}</li>
+        </ul>
       {/if}
-      <button class="btn primary" disabled={selected.size === 0 || !!problem} onclick={onCount}>Count messages</button>
+      <button class="btn primary" disabled={selected.size === 0 || !!problem} onclick={onCount}>{t("setup.count")}</button>
     </div>
   </section>
 </div>
@@ -846,5 +857,12 @@
 
   .problem {
     color: var(--danger);
+  }
+
+  .summary {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 2px;
   }
 </style>

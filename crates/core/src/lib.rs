@@ -8,6 +8,7 @@
 pub mod client;
 pub mod delete;
 pub mod error;
+pub mod export;
 pub mod filter;
 pub mod job;
 pub mod models;
@@ -20,6 +21,7 @@ pub mod targets;
 pub use client::{Client, ClientConfig, Notice, NoticeSink};
 pub use delete::SkipReason;
 pub use error::{Error, Result};
+pub use export::{ExportFormat, ExportWriter};
 pub use filter::{Filter, Has};
 pub use job::{Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
 pub use models::{Message, User};

@@ -1,0 +1,242 @@
+//! A record of what a run deleted (or, in a dry run, would delete): one row
+//! per message with its text and attachment links, as CSV or JSON.
+
+use std::collections::HashMap;
+use std::io::{self, Write};
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::job::Event;
+use crate::snowflake::Snowflake;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFormat {
+    /// Comma-separated, UTF-8 with a byte order mark so spreadsheet programs
+    /// read non-English text correctly.
+    Csv,
+    /// A JSON array of objects.
+    Json,
+}
+
+impl ExportFormat {
+    /// JSON for `.json` files, CSV for anything else.
+    pub fn for_path(path: &Path) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(ext) if ext.eq_ignore_ascii_case("json") => ExportFormat::Json,
+            _ => ExportFormat::Csv,
+        }
+    }
+}
+
+/// One exported message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct Row<'a> {
+    place: &'a str,
+    place_id: String,
+    channel_id: String,
+    message_id: String,
+    sent_at: String,
+    status: &'static str,
+    content: &'a str,
+    attachments: &'a [String],
+}
+
+const CSV_HEADER: &str =
+    "place,place_id,channel_id,message_id,sent_at,status,content,attachments\r\n";
+
+/// Writes [`Event::Deleted`] events as they arrive; other events only supply
+/// the names of servers and DMs. Call [`ExportWriter::finish`] at the end.
+pub struct ExportWriter<W: Write> {
+    out: W,
+    format: ExportFormat,
+    names: HashMap<Snowflake, String>,
+    rows: u64,
+}
+
+impl<W: Write> ExportWriter<W> {
+    pub fn new(mut out: W, format: ExportFormat) -> io::Result<Self> {
+        match format {
+            ExportFormat::Csv => write!(out, "\u{feff}{CSV_HEADER}")?,
+            ExportFormat::Json => write!(out, "[")?,
+        }
+        Ok(ExportWriter {
+            out,
+            format,
+            names: HashMap::new(),
+            rows: 0,
+        })
+    }
+
+    /// Messages written so far.
+    pub fn rows(&self) -> u64 {
+        self.rows
+    }
+
+    pub fn observe(&mut self, event: &Event) -> io::Result<()> {
+        match event {
+            Event::TargetStarted {
+                target_id, name, ..
+            } => {
+                self.names.insert(*target_id, name.clone());
+            }
+            Event::Deleted {
+                target_id,
+                channel_id,
+                message_id,
+                sent_at,
+                content,
+                attachments,
+                dry_run,
+                ..
+            } => {
+                let place = self.names.get(target_id).cloned().unwrap_or_default();
+                let row = Row {
+                    place: &place,
+                    place_id: target_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    message_id: message_id.to_string(),
+                    sent_at: sent_at.to_rfc3339(),
+                    status: if *dry_run { "would_delete" } else { "deleted" },
+                    content,
+                    attachments,
+                };
+                self.write_row(&row)?;
+                self.rows += 1;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn write_row(&mut self, row: &Row<'_>) -> io::Result<()> {
+        match self.format {
+            ExportFormat::Csv => {
+                let attachments = row.attachments.join(" ");
+                let cells = [
+                    row.place,
+                    &row.place_id,
+                    &row.channel_id,
+                    &row.message_id,
+                    &row.sent_at,
+                    row.status,
+                    row.content,
+                    &attachments,
+                ];
+                let line: Vec<String> = cells.iter().map(|c| csv_cell(c)).collect();
+                write!(self.out, "{}\r\n", line.join(","))?;
+            }
+            ExportFormat::Json => {
+                let separator = if self.rows == 0 { "\n  " } else { ",\n  " };
+                write!(self.out, "{separator}")?;
+                serde_json::to_writer(&mut self.out, row)?;
+            }
+        }
+        self.out.flush()
+    }
+
+    /// Completes the file and returns the writer.
+    pub fn finish(mut self) -> io::Result<W> {
+        if self.format == ExportFormat::Json {
+            writeln!(self.out, "{}]", if self.rows == 0 { "" } else { "\n" })?;
+        }
+        self.out.flush()?;
+        Ok(self.out)
+    }
+}
+
+/// Quotes a CSV cell when needed. Cells starting with `=`, `+`, `-` or `@`
+/// get a leading apostrophe, so a spreadsheet does not run message text as
+/// a formula.
+fn csv_cell(value: &str) -> String {
+    let value = if value.starts_with(['=', '+', '-', '@']) {
+        format!("'{value}")
+    } else {
+        value.to_owned()
+    };
+    if value.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    fn deleted(id: u64, content: &str, dry_run: bool) -> Event {
+        Event::Deleted {
+            target_id: Snowflake(10),
+            channel_id: Snowflake(11),
+            message_id: Snowflake(id),
+            sent_at: Utc.with_ymd_and_hms(2024, 5, 1, 12, 0, 0).unwrap(),
+            preview: String::new(),
+            content: content.into(),
+            attachments: vec!["https://cdn/a.png".into(), "https://cdn/b.txt".into()],
+            dry_run,
+        }
+    }
+
+    fn started() -> Event {
+        Event::TargetStarted {
+            index: 0,
+            target_id: Snowflake(10),
+            name: "Rust, Enjoyers".into(),
+        }
+    }
+
+    #[test]
+    fn writes_csv() {
+        let mut writer = ExportWriter::new(Vec::new(), ExportFormat::Csv).unwrap();
+        for event in [
+            started(),
+            deleted(1, "hi \"you\"\nthere", false),
+            deleted(2, "=1+1", true),
+        ] {
+            writer.observe(&event).unwrap();
+        }
+        assert_eq!(writer.rows(), 2);
+        let text = String::from_utf8(writer.finish().unwrap()).unwrap();
+        let lines: Vec<&str> = text.split("\r\n").collect();
+        assert_eq!(lines[0], format!("\u{feff}{}", CSV_HEADER.trim_end()));
+        assert_eq!(
+            lines[1],
+            "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt"
+        );
+        assert!(lines[2].contains(",would_delete,'=1+1,"));
+    }
+
+    #[test]
+    fn writes_json() {
+        let mut writer = ExportWriter::new(Vec::new(), ExportFormat::Json).unwrap();
+        for event in [started(), deleted(1, "ü", false), deleted(2, "b", true)] {
+            writer.observe(&event).unwrap();
+        }
+        let value: serde_json::Value = serde_json::from_slice(&writer.finish().unwrap()).unwrap();
+        assert_eq!(value[0]["place"], "Rust, Enjoyers");
+        assert_eq!(value[0]["content"], "ü");
+        assert_eq!(value[0]["message_id"], "1");
+        assert_eq!(value[1]["status"], "would_delete");
+        assert_eq!(value[1]["attachments"][0], "https://cdn/a.png");
+
+        let empty = ExportWriter::new(Vec::new(), ExportFormat::Json).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&empty.finish().unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!([]));
+    }
+
+    #[test]
+    fn picks_the_format_from_the_extension() {
+        assert_eq!(
+            ExportFormat::for_path(Path::new("a/b.JSON")),
+            ExportFormat::Json
+        );
+        assert_eq!(
+            ExportFormat::for_path(Path::new("b.csv")),
+            ExportFormat::Csv
+        );
+        assert_eq!(ExportFormat::for_path(Path::new("b")), ExportFormat::Csv);
+    }
+}

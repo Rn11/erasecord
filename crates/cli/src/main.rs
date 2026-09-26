@@ -11,8 +11,8 @@ use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
-    friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, Has, Notice,
-    Package, PackageTarget, Snowflake, Target, TargetKind,
+    friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
+    ExportWriter, Has, Notice, Package, PackageTarget, Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -149,6 +149,10 @@ struct DeleteOptions {
     /// Print every deleted or skipped message.
     #[arg(short, long)]
     verbose: bool,
+    /// Save every deleted message (or, with --dry-run, every message that would be deleted),
+    /// with its text and attachment links, to FILE: JSON for a .json file, CSV otherwise.
+    #[arg(long, value_name = "FILE")]
+    export: Option<PathBuf>,
     /// Pause after each deletion, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = JobOptions::default().delete_delay_ms)]
     delete_delay: u64,
@@ -391,6 +395,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 job_options,
                 control,
                 options.verbose,
+                options.export.as_deref(),
             )
             .await
         }
@@ -646,7 +651,18 @@ async fn delete(
     options: JobOptions,
     control: JobControl,
     verbose: bool,
+    export: Option<&Path>,
 ) -> Result<ExitCode> {
+    // Created before anything is deleted, so a bad path costs nothing.
+    let mut exporter = match export {
+        Some(path) => {
+            let file = std::fs::File::create(path)
+                .with_context(|| format!("cannot create {}", path.display()))?;
+            let writer = io::BufWriter::new(file);
+            Some(ExportWriter::new(writer, ExportFormat::for_path(path))?)
+        }
+        None => None,
+    };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let dry_run = options.dry_run;
     let target_count = targets.len();
@@ -665,8 +681,20 @@ async fn delete(
     let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);
     while let Some(event) = rx.recv().await {
         progress.handle(&event);
+        if let Some(exporter) = exporter.as_mut() {
+            exporter
+                .observe(&event)
+                .context("could not write the export file")?;
+        }
     }
     let summary = task.await?;
+    if let (Some(exporter), Some(path)) = (exporter, export) {
+        let rows = exporter.rows();
+        exporter
+            .finish()
+            .context("could not write the export file")?;
+        println!("Saved {rows} message(s) to {}.", path.display());
+    }
 
     println!(
         "Done: {} {}, {} skipped, {} failed.",

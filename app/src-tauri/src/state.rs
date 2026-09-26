@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use erasecord_core::{Client, JobControl, Package, User};
+use erasecord_core::{Client, Event, JobControl, Package, User};
 
 use crate::commands::CommandError;
 
@@ -21,6 +21,9 @@ pub struct AppState {
     /// The imported data package, if any. Kept here: it is too big to send
     /// to the web view.
     package: Mutex<Option<Arc<Package>>>,
+    /// The events of the last clean-up that an export needs: names and
+    /// deleted messages.
+    last_run: Mutex<Vec<Event>>,
 }
 
 impl AppState {
@@ -52,6 +55,20 @@ impl AppState {
 
     pub fn job(&self) -> Option<JobControl> {
         self.job.lock().unwrap().clone()
+    }
+
+    pub fn clear_last_run(&self) {
+        self.last_run.lock().unwrap().clear();
+    }
+
+    pub fn record(&self, event: &Event) {
+        if matches!(event, Event::TargetStarted { .. } | Event::Deleted { .. }) {
+            self.last_run.lock().unwrap().push(event.clone());
+        }
+    }
+
+    pub fn last_run(&self) -> Vec<Event> {
+        self.last_run.lock().unwrap().clone()
     }
 
     pub fn package(&self) -> Option<Arc<Package>> {

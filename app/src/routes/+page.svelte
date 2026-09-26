@@ -5,6 +5,9 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
+  import { errorMessage } from "$lib/errors";
+  import { applyDocumentLanguage, t } from "$lib/i18n.svelte";
+  import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import {
     contentProblem,
     displayName,
@@ -77,6 +80,7 @@
   const unlisten: UnlistenFn[] = [];
 
   onMount(async () => {
+    applyDocumentLanguage();
     if (import.meta.env.DEV && !isTauri()) {
       const { installMockBackend } = await import("$lib/mock");
       installMockBackend();
@@ -94,7 +98,7 @@
       if (restored) await enter(restored);
       else screen = "login";
     } catch (err) {
-      notice = `Could not log in with the saved token: ${asCommandError(err).message}`;
+      notice = t("page.savedTokenFailed", { error: errorMessage(err) });
       screen = "login";
     }
   });
@@ -106,16 +110,16 @@
     const error = asCommandError(err);
     if (error.kind === "unauthorized" || error.kind === "not_logged_in") {
       user = null;
-      notice = "Discord no longer accepts your token. Please log in again.";
+      notice = t("page.tokenRejected");
       screen = "login";
       return null;
     }
-    return error.message;
+    return errorMessage(error);
   }
 
   async function enter(loggedIn: User, rememberError: string | null = null) {
     user = loggedIn;
-    notice = rememberError ? `Logged in, but the token could not be remembered: ${rememberError}` : null;
+    notice = rememberError ? t("page.rememberFailed", { error: rememberError }) : null;
     screen = "setup";
     await loadTargets();
   }
@@ -151,7 +155,7 @@
       const channels = await api.listChannels(guildId);
       channelLists.set(guildId, { loading: false, error: null, channels });
     } catch (err) {
-      channelLists.set(guildId, { loading: false, error: fail(err) ?? "Not logged in", channels: [] });
+      channelLists.set(guildId, { loading: false, error: fail(err) ?? t("page.tokenRejected"), channels: [] });
     }
   }
 
@@ -182,7 +186,7 @@
       friends = friends?.filter((f) => f.user_id !== friend.user_id) ?? null;
     } catch (err) {
       const message = fail(err);
-      if (message) friendsError = `Could not open the DM with ${friend.name}: ${message}`;
+      if (message) friendsError = t("page.openDmFailed", { name: friend.name, error: message });
     } finally {
       opening.delete(friend.user_id);
     }
@@ -199,13 +203,13 @@
     let path: string | null;
     try {
       path = await open({
-        title: folder ? "Choose the extracted data package folder" : "Choose your Discord data package",
+        title: folder ? t("page.pickFolder") : t("page.pickZip"),
         directory: folder,
         multiple: false,
-        filters: folder ? undefined : [{ name: "Discord data package", extensions: ["zip"] }],
+        filters: folder ? undefined : [{ name: t("page.packageFilter"), extensions: ["zip"] }],
       });
     } catch (err) {
-      importError = asCommandError(err).message;
+      importError = errorMessage(err);
       return;
     }
     if (!path) return;
@@ -313,6 +317,7 @@
     <header class="topbar">
       <span class="brand">EraseCord</span>
       <span class="spacer"></span>
+      <LanguagePicker />
       <span class="user">
         <Avatar
           name={displayName(user)}
@@ -321,7 +326,7 @@
         />
         {displayName(user)}
       </span>
-      <button class="btn ghost small" onclick={logout} disabled={busy}>Log out</button>
+      <button class="btn ghost small" onclick={logout} disabled={busy}>{t("common.logOut")}</button>
     </header>
   {/if}
 
@@ -329,12 +334,12 @@
     {#if notice && user}
       <div class="callout info small notice">
         <span>{notice}</span>
-        <button class="btn ghost small" onclick={() => (notice = null)} aria-label="Dismiss">✕</button>
+        <button class="btn ghost small" onclick={() => (notice = null)} aria-label={t("common.dismiss")}>✕</button>
       </div>
     {/if}
 
     {#if screen === "starting"}
-      <p class="starting muted"><span class="spinner"></span> Starting…</p>
+      <p class="starting muted"><span class="spinner"></span> {t("common.starting")}</p>
     {:else if screen === "login"}
       <Login {notice} onLogin={enter} />
     {:else if screen === "setup"}

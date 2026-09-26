@@ -12,6 +12,19 @@ use tokio::sync::mpsc;
 use wiremock::matchers::any;
 use wiremock::{Mock, ResponseTemplate};
 
+/// Waits until `done` holds, instead of guessing how long a slow CI
+/// machine needs.
+async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting until {what}"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+}
+
 fn fast() -> JobOptions {
     JobOptions {
         delete_delay_ms: 0,
@@ -275,7 +288,7 @@ async fn cancel_stops_after_the_current_message() {
         })
     };
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_until("something was deleted", || fake.delete_calls() > 0).await;
     control.cancel();
     let summary = tokio::time::timeout(Duration::from_secs(5), task)
         .await
@@ -529,7 +542,7 @@ async fn overwrites_before_deleting() {
 async fn stopping_during_a_delete_still_counts_it() {
     let messages = (0..5).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
     let mut state = State::with_messages(messages);
-    state.delete_delay = Duration::from_millis(300);
+    state.delete_delay = Duration::from_millis(500);
     let fake = FakeDiscord::start(state).await;
     let control = JobControl::new();
     let (tx, _rx) = mpsc::unbounded_channel();
@@ -550,9 +563,8 @@ async fn stopping_during_a_delete_still_counts_it() {
         })
     };
 
-    // The first delete has reached the server but not answered yet.
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    assert_eq!(fake.delete_calls(), 1);
+    // Stop while the first delete has reached the server but not answered.
+    wait_until("the first delete arrived", || fake.delete_calls() > 0).await;
     control.cancel();
     let summary = tokio::time::timeout(Duration::from_secs(5), task)
         .await

@@ -34,6 +34,7 @@ export const api = {
     invoke<PreviewEntry[]>("preview_package", { targets, filter }),
   startPackageJob: (targets: Target[], filter: Filter, options: JobOptions) =>
     invoke<void>("start_package_job", { targets, filter, options }),
+  exportRun: (path: string) => invoke<number>("export_run", { path }),
   pauseJob: () => invoke<void>("pause_job"),
   resumeJob: () => invoke<void>("resume_job"),
   cancelJob: () => invoke<void>("cancel_job"),

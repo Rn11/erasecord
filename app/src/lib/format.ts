@@ -1,3 +1,4 @@
+import { i18n, joinAnd, joinOr, num, t, type Key } from "./i18n.svelte";
 import type { Filter, Has, Notice, SkipReason, Target, User } from "./types";
 
 export type RangeMode = "all" | "older_than" | "between";
@@ -24,18 +25,10 @@ export interface ContentForm {
 
 export const emptyContent = (): ContentForm => ({ contains: "", pattern: "", has: [], without: [] });
 
-export const HAS_KINDS: { value: Has; label: string }[] = [
-  { value: "link", label: "Links" },
-  { value: "file", label: "Attachments" },
-  { value: "image", label: "Images" },
-  { value: "video", label: "Videos" },
-  { value: "sound", label: "Audio" },
-  { value: "embed", label: "Embeds" },
-  { value: "sticker", label: "Stickers" },
-];
+export const HAS_KINDS: Has[] = ["link", "file", "image", "video", "sound", "embed", "sticker"];
 
-function hasLabel(has: Has): string {
-  return HAS_KINDS.find((k) => k.value === has)?.label.toLowerCase() ?? has;
+export function hasLabel(has: Has): string {
+  return t(`has.${has}` as Key);
 }
 
 /** Why the content conditions cannot be used, or null. */
@@ -44,22 +37,22 @@ export function contentProblem(content: ContentForm): string | null {
     try {
       new RegExp(content.pattern.trim(), "i");
     } catch {
-      return "The regular expression is not valid.";
+      return t("problem.regex");
     }
   }
   const both = content.has.filter((h) => content.without.includes(h));
-  if (both.length > 0) return `“${hasLabel(both[0])}” cannot be both required and kept.`;
+  if (both.length > 0) return t("problem.hasBoth", { kind: hasLabel(both[0]) });
   return null;
 }
 
 /** Why the form cannot be used yet, or null. */
 export function rangeProblem(range: RangeForm): string | null {
   if (range.mode === "older_than" && !(Number.isInteger(range.amount) && range.amount > 0)) {
-    return "Enter a whole number greater than 0.";
+    return t("problem.amount");
   }
   if (range.mode === "between") {
-    if (!range.from && !range.to) return "Pick at least one date.";
-    if (range.from && range.to && range.from > range.to) return "The start date is after the end date.";
+    if (!range.from && !range.to) return t("problem.pickDate");
+    if (range.from && range.to && range.from > range.to) return t("problem.dateOrder");
   }
   return null;
 }
@@ -120,77 +113,97 @@ function subtract(now: Date, amount: number, unit: AgeUnit): Date {
   return date;
 }
 
-export function describeFilter(filter: Filter): string {
+/** The conditions of a filter, one short statement each. */
+export function filterLines(filter: Filter): string[] {
   const after = filter.after ? formatDate(filter.after) : null;
   const before = filter.before ? formatDate(filter.before) : null;
-  const parts = [
+  const lines = [
     after && before
-      ? `sent from ${after} until before ${before}`
+      ? t("filter.between", { after, before })
       : after
-        ? `sent on or after ${after}`
+        ? t("filter.after", { date: after })
         : before
-          ? `sent before ${before}`
-          : "from any time",
+          ? t("filter.before", { date: before })
+          : t("filter.anyTime"),
   ];
-  if (filter.content) parts.push(`containing “${filter.content}”`);
-  if (filter.pattern) parts.push(`matching /${filter.pattern}/`);
-  if (filter.has.length) parts.push(`with ${listOr(filter.has.map(hasLabel))}`);
-  if (filter.without.length) parts.push(`except those with ${listOr(filter.without.map(hasLabel))}`);
-  return parts.join(", ");
+  if (filter.content) lines.push(t("filter.containing", { words: filter.content }));
+  if (filter.pattern) lines.push(t("filter.matching", { pattern: filter.pattern }));
+  if (filter.has.length) lines.push(t("filter.with", { kinds: joinOr(filter.has.map(lowerLabel)) }));
+  if (filter.without.length) lines.push(t("filter.except", { kinds: joinOr(filter.without.map(lowerLabel)) }));
+  return lines;
 }
 
-function listOr(items: string[]): string {
-  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
+function lowerLabel(has: Has): string {
+  // German nouns keep their capital letter.
+  return i18n.locale === "de" ? hasLabel(has) : hasLabel(has).toLocaleLowerCase(i18n.locale);
+}
+
+/** "2 servers and 1 DM". */
+export function describePlaces(servers: number, dms: number): string {
+  const parts = [];
+  if (servers) parts.push(t("count.server", { count: servers }));
+  if (dms) parts.push(t("count.dm", { count: dms }));
+  return joinAnd(parts);
 }
 
 export function formatDate(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(iso).toLocaleString(i18n.locale, { dateStyle: "medium", timeStyle: "short" });
 }
 
 export function formatDuration(ms: number): string {
+  const unit = (value: number, name: "second" | "minute" | "hour") =>
+    new Intl.NumberFormat(i18n.locale, { style: "unit", unit: name, unitDisplay: "short" }).format(value);
   const minutes = Math.round(ms / 60_000);
-  if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))} s`;
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} h ${minutes % 60} min`;
+  if (ms < 60_000) return unit(Math.max(1, Math.round(ms / 1000)), "second");
+  if (minutes < 60) return unit(minutes, "minute");
+  return `${unit(Math.floor(minutes / 60), "hour")} ${unit(minutes % 60, "minute")}`;
+}
+
+function seconds(ms: number): string {
+  return new Intl.NumberFormat(i18n.locale, {
+    style: "unit",
+    unit: "second",
+    unitDisplay: "short",
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(ms / 1000);
 }
 
 export function describeNotice(notice: Notice): string {
-  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
   switch (notice.kind) {
     case "rate_limited":
-      return `Rate limited by Discord${notice.global ? " (global)" : ""}, waiting ${seconds(notice.wait_ms)}`;
+      return t(notice.global ? "notice.rateLimitedGlobal" : "notice.rateLimited", { seconds: seconds(notice.wait_ms) });
     case "index_not_ready":
-      return `Discord is still indexing messages, waiting ${seconds(notice.wait_ms)}`;
+      return t("notice.index", { seconds: seconds(notice.wait_ms) });
     case "retrying":
-      return `${notice.reason}; retry ${notice.attempt} in ${seconds(notice.wait_ms)}`;
+      return t("notice.retrying", {
+        reason: notice.reason,
+        attempt: String(notice.attempt),
+        seconds: seconds(notice.wait_ms),
+      });
   }
 }
 
 export function describeSkip(reason: SkipReason): string {
-  switch (reason) {
-    case "pinned":
-      return "pinned";
-    case "excluded":
-      return "excluded by filter";
-    case "system_message":
-      return "system message";
-    case "no_permission":
-      return "no permission";
-    case "archived_thread":
-      return "archived thread";
-  }
+  return t(`skip.${reason}` as Key);
+}
+
+/** A one-line excerpt of a message for the activity log. */
+export function messagePreview(content: string, attachments: number): string {
+  const text = content.split(/\s+/).filter(Boolean).join(" ");
+  if (text) return text.length > 100 ? `${text.slice(0, 100)}…` : text;
+  return attachments ? t("preview.attachments", { count: attachments }) : t("preview.noPreview");
 }
 
 export function displayName(user: User): string {
   return user.global_name || user.username;
 }
 
-export function plural(count: number, word: string): string {
-  return `${count.toLocaleString()} ${word}${count === 1 ? "" : "s"}`;
-}
-
 /** A target's name, with the number of channels if only some are selected. */
 export function targetLabel(target: Target): string {
-  return target.channels.length ? `${target.name} · ${plural(target.channels.length, "channel")}` : target.name;
+  return target.channels.length
+    ? `${target.name} · ${t("count.channel", { count: target.channels.length })}`
+    : target.name;
 }
+
+export { num };

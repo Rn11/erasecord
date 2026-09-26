@@ -18,6 +18,7 @@ pub fn run() {
             commands::preview,
             commands::start_job,
             commands::start_package_job,
+            commands::export_run,
             commands::import_package,
             commands::close_package,
             commands::preview_package,
