@@ -3,8 +3,10 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use purgecord_core::{
-    job, Event, Filter, JobControl, JobOptions, SkipReason, Snowflake, Summary, Target,
+use erasecord_core::package::{PackageChannel, PackageMessage};
+use erasecord_core::{
+    job, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake, Summary,
+    Target, TargetKind,
 };
 use tokio::sync::mpsc;
 use wiremock::matchers::any;
@@ -56,7 +58,7 @@ async fn deletes_only_own_messages_inside_the_range() {
     let filter = Filter {
         after: Some(at(10)),
         before: Some(at(20)),
-        skip_pinned: false,
+        ..Default::default()
     };
 
     let (summary, events) = run_job(&fake, &[guild_target()], filter, fast()).await;
@@ -361,4 +363,401 @@ async fn preview_counts_matching_messages_per_target() {
         .contains("Missing Access"));
     assert_eq!(progress, [0, 1, 2]);
     assert_eq!(fake.delete_calls(), 0);
+}
+
+fn skip_reasons(events: &[Event]) -> Vec<SkipReason> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Skipped { reason, .. } => Some(*reason),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn keyword_is_searched_and_checked_again() {
+    let keep = FakeMessage::in_dm(0, 0).with_text("secret meeting later");
+    // The fake search is fuzzy like Discord's and returns this one as well.
+    let fuzzy = FakeMessage::in_dm(1, 0).with_text("the plan");
+    let hit = FakeMessage::in_dm(2, 0).with_text("Secret PLAN, don't tell");
+    let other = FakeMessage::in_dm(3, 0).with_text("hello");
+    let fake = FakeDiscord::start(State::with_messages(vec![
+        keep.clone(),
+        fuzzy.clone(),
+        hit.clone(),
+        other.clone(),
+    ]))
+    .await;
+    let filter = Filter {
+        content: Some("secret plan".into()),
+        ..Default::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 2));
+    assert_eq!(skip_reasons(&events), [SkipReason::Excluded; 2]);
+    let mut expected = vec![keep.id, fuzzy.id, other.id];
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+}
+
+#[tokio::test]
+async fn pattern_and_without_keep_messages() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into()],
+        ..FakeMessage::in_dm(0, 0).with_text("lol look")
+    };
+    let lol = FakeMessage::in_dm(1, 0).with_text("LOL");
+    let other = FakeMessage::in_dm(2, 0).with_text("lollipop");
+    let fake = FakeDiscord::start(State::with_messages(vec![
+        photo.clone(),
+        lol.clone(),
+        other.clone(),
+    ]))
+    .await;
+    let filter = Filter {
+        pattern: Some(r"\blol\b".into()),
+        without: vec![Has::File],
+        ..Default::default()
+    };
+
+    let (summary, _) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 2));
+    let mut expected = vec![photo.id, other.id];
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+}
+
+#[tokio::test]
+async fn has_file_only_deletes_messages_with_attachments() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into()],
+        ..FakeMessage::in_dm(0, 0)
+    };
+    let text = FakeMessage::in_dm(1, 0);
+    let fake = FakeDiscord::start(State::with_messages(vec![photo.clone(), text.clone()])).await;
+    let filter = Filter {
+        has: vec![Has::File],
+        ..Default::default()
+    };
+
+    let (summary, _) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(fake.remaining(), vec![text.id]);
+}
+
+#[tokio::test]
+async fn invalid_pattern_stops_before_any_request() {
+    let fake = FakeDiscord::start(State::with_messages(vec![FakeMessage::in_dm(0, 0)])).await;
+    let filter = Filter {
+        pattern: Some("([".into()),
+        ..Default::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], filter, fast()).await;
+
+    assert!(summary.error.unwrap().contains("regular expression"));
+    assert_eq!(events.len(), 1);
+    assert_eq!(fake.state.lock().unwrap().search_calls, 0);
+}
+
+#[tokio::test]
+async fn only_selected_channels_are_cleaned_up() {
+    for ignore_channel_filter in [false, true] {
+        let first = FakeMessage::in_guild(0, 0, ME);
+        let second = FakeMessage {
+            channel_id: GUILD_CHANNEL_2,
+            ..FakeMessage::in_guild(1, 0, ME)
+        };
+        let mut state = State::with_messages(vec![first.clone(), second.clone()]);
+        state.ignore_channel_filter = ignore_channel_filter;
+        let fake = FakeDiscord::start(state).await;
+        let target = Target {
+            channels: vec![Snowflake(GUILD_CHANNEL_2)],
+            ..guild_target()
+        };
+
+        let (summary, _) = run_job(&fake, &[target], Filter::default(), fast()).await;
+
+        assert_eq!(summary.stats.deleted, 1, "ignore: {ignore_channel_filter}");
+        assert_eq!(fake.remaining(), vec![first.id]);
+    }
+}
+
+#[tokio::test]
+async fn overwrites_before_deleting() {
+    let messages = vec![FakeMessage::in_dm(0, 0), FakeMessage::in_dm(1, 0)];
+    let ids: Vec<u64> = messages.iter().map(|m| m.id).collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+
+    for (text, random) in [("", true), ("deleted", false)] {
+        fake.state.lock().unwrap().edits.clear();
+        let options = JobOptions {
+            overwrite: Some(text.into()),
+            dry_run: false,
+            ..fast()
+        };
+        let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+        if random {
+            assert_eq!(summary.stats.deleted, 2);
+            let state = fake.state.lock().unwrap();
+            // Newest first: edit, then delete, message by message.
+            let expected: Vec<String> = ids
+                .iter()
+                .rev()
+                .flat_map(|id| [format!("PATCH {id}"), format!("DELETE {id}")])
+                .collect();
+            assert_eq!(state.log, expected);
+            for (_, body) in &state.edits {
+                assert!(!body["content"].as_str().unwrap().is_empty());
+                assert_eq!(body["attachments"], serde_json::json!([]));
+            }
+        } else {
+            // Everything is gone already; nothing to edit.
+            assert_eq!(summary.stats.deleted, 0);
+            assert!(fake.state.lock().unwrap().edits.is_empty());
+        }
+    }
+    assert!(fake.remaining().is_empty());
+}
+
+#[tokio::test]
+async fn stopping_during_a_delete_still_counts_it() {
+    let messages = (0..5).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let mut state = State::with_messages(messages);
+    state.delete_delay = Duration::from_millis(300);
+    let fake = FakeDiscord::start(state).await;
+    let control = JobControl::new();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let client = fake.client();
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            job::run(
+                &client,
+                Snowflake(ME),
+                &[dm_target()],
+                &Filter::default(),
+                &fast(),
+                &control,
+                tx,
+            )
+            .await
+        })
+    };
+
+    // The first delete has reached the server but not answered yet.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(fake.delete_calls(), 1);
+    control.cancel();
+    let summary = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(summary.cancelled);
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(fake.remaining().len(), 4);
+}
+
+/// A package holding the given messages, as the API fake knows them.
+fn package_of(messages: &[FakeMessage]) -> Package {
+    let mut channels: Vec<PackageChannel> = Vec::new();
+    for m in messages {
+        let message = PackageMessage {
+            id: Snowflake(m.id),
+            content: m.text(),
+            attachments: m.files.iter().map(|f| format!("https://cdn/{f}")).collect(),
+        };
+        match channels.iter_mut().find(|c| c.id.0 == m.channel_id) {
+            Some(channel) => channel.messages.insert(0, message),
+            None => channels.push(PackageChannel {
+                id: Snowflake(m.channel_id),
+                kind: if m.guild_id.is_some() {
+                    TargetKind::Guild
+                } else {
+                    TargetKind::Dm
+                },
+                name: format!("channel {}", m.channel_id),
+                guild: m.guild_id.map(|g| (Snowflake(g), "Test server".to_owned())),
+                messages: vec![message],
+            }),
+        }
+    }
+    for channel in &mut channels {
+        channel.messages.sort_by_key(|m| std::cmp::Reverse(m.id));
+    }
+    Package {
+        owner: Some(Snowflake(ME)),
+        channels,
+    }
+}
+
+async fn run_package_job(
+    fake: &FakeDiscord,
+    package: &Package,
+    targets: &[Target],
+    filter: Filter,
+    options: JobOptions,
+) -> (Summary, Vec<Event>) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (client, control) = (fake.client(), JobControl::new());
+    let run = job::run_package(
+        &client,
+        Snowflake(ME),
+        package,
+        targets,
+        &filter,
+        &options,
+        &control,
+        tx,
+    );
+    let summary = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("job did not finish");
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    (summary, events)
+}
+
+#[tokio::test]
+async fn deletes_from_a_data_package_without_searching() {
+    let in_range = FakeMessage::in_guild(5, 0, ME).with_text("party tonight");
+    let other_channel = FakeMessage {
+        channel_id: GUILD_CHANNEL_2,
+        ..FakeMessage::in_guild(6, 0, ME).with_text("party!")
+    };
+    let pinned = FakeMessage {
+        pinned: true,
+        ..FakeMessage::in_guild(7, 0, ME).with_text("party rules")
+    };
+    let no_match = FakeMessage::in_guild(8, 0, ME).with_text("hello");
+    let too_old = FakeMessage::in_guild(0, 0, ME).with_text("party");
+    let messages = vec![
+        in_range.clone(),
+        other_channel.clone(),
+        pinned.clone(),
+        no_match.clone(),
+        too_old.clone(),
+    ];
+    let package = package_of(&messages);
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+    let filter = Filter {
+        after: Some(at(1)),
+        content: Some("party".into()),
+        skip_pinned: true,
+        ..Default::default()
+    };
+
+    let preview = job::preview_package(&package, Snowflake(ME), &targets, &filter).unwrap();
+    assert_eq!(preview[0].count, Some(3));
+
+    let only_first_channel = Target {
+        channels: vec![Snowflake(GUILD_CHANNEL)],
+        ..targets[0].clone()
+    };
+    let (summary, events) =
+        run_package_job(&fake, &package, &[only_first_channel], filter, fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 1));
+    assert_eq!(skip_reasons(&events), [SkipReason::Pinned]);
+    assert_eq!(fake.state.lock().unwrap().search_calls, 0);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::TargetEstimate { total: 2, .. })));
+    let mut expected = vec![other_channel.id, pinned.id, no_match.id, too_old.id];
+    expected.sort_unstable();
+    assert_eq!(fake.remaining(), expected);
+}
+
+#[tokio::test]
+async fn unreachable_package_channels_cost_one_request() {
+    let messages: Vec<FakeMessage> = (0..20)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let package = package_of(&messages);
+    let mut state = State::with_messages(messages);
+    state.gone_channels.push(DM_CHANNEL);
+    let fake = FakeDiscord::start(state).await;
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+
+    let (summary, events) =
+        run_package_job(&fake, &package, &targets, Filter::default(), fast()).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.skipped), (0, 20));
+    assert_eq!(fake.delete_calls(), 0);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::ChannelUnreachable { messages: 20, error, .. } if error.contains("Unknown Channel")
+    )));
+}
+
+#[tokio::test]
+async fn package_runs_reject_filters_the_package_cannot_answer() {
+    let package = package_of(&[FakeMessage::in_dm(0, 0)]);
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+    let filter = Filter {
+        without: vec![Has::Sticker],
+        ..Default::default()
+    };
+    assert!(job::preview_package(&package, Snowflake(ME), &targets, &filter).is_err());
+}
+
+#[tokio::test]
+async fn refuses_a_package_of_another_account() {
+    let messages = vec![FakeMessage::in_dm(0, 0)];
+    let package = Package {
+        owner: Some(Snowflake(OTHER)),
+        ..package_of(&messages)
+    };
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+
+    let (summary, _) = run_package_job(&fake, &package, &targets, Filter::default(), fast()).await;
+
+    assert!(summary.error.unwrap().contains("another account"));
+    assert_eq!(fake.delete_calls(), 0);
+}
+
+#[tokio::test]
+async fn keeps_every_pin_of_a_channel_with_many() {
+    for legacy_pins in [false, true] {
+        // 120 pinned messages, one minute apart, and one that is not pinned.
+        let mut messages: Vec<FakeMessage> = (0..120)
+            .map(|minute| FakeMessage {
+                pinned: true,
+                ..FakeMessage::in_dm(minute, 0)
+            })
+            .collect();
+        messages.push(FakeMessage::in_dm(500, 0));
+        let package = package_of(&messages);
+        let mut state = State::with_messages(messages);
+        state.legacy_pins = legacy_pins;
+        let fake = FakeDiscord::start(state).await;
+        let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+        let filter = Filter {
+            skip_pinned: true,
+            ..Default::default()
+        };
+
+        let (summary, events) = run_package_job(&fake, &package, &targets, filter, fast()).await;
+
+        if legacy_pins {
+            // The old endpoint cannot list them all, so nothing is touched.
+            assert_eq!((summary.stats.deleted, summary.stats.skipped), (0, 121));
+            assert!(events.iter().any(
+                |e| matches!(e, Event::ChannelUnreachable { error, .. } if error.contains("pinned"))
+            ));
+        } else {
+            assert_eq!((summary.stats.deleted, summary.stats.skipped), (1, 120));
+        }
+        assert_eq!(fake.remaining().len(), if legacy_pins { 121 } else { 120 });
+    }
 }

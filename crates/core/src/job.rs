@@ -14,43 +14,13 @@ use tokio_util::sync::CancellationToken;
 use crate::client::{Client, Notice};
 use crate::delete::{self, Outcome, SkipReason};
 use crate::error::{Error, Result};
+pub use crate::filter::Filter;
+use crate::filter::Matcher;
 use crate::models::Message;
+use crate::package::Package;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
-
-/// Which messages to delete.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Filter {
-    /// Only messages sent at or after this time.
-    pub after: Option<DateTime<Utc>>,
-    /// Only messages sent before this time.
-    pub before: Option<DateTime<Utc>>,
-    /// Leave pinned messages alone.
-    pub skip_pinned: bool,
-}
-
-impl Filter {
-    fn search_query(&self, author: Snowflake) -> SearchQuery {
-        SearchQuery {
-            author_id: Some(author),
-            // One below the bound, so it works whether Discord treats min_id as
-            // inclusive or exclusive; `contains` drops anything too early.
-            min_id: self
-                .after
-                .map(|t| Snowflake(Snowflake::from_datetime(t).0.saturating_sub(1))),
-            max_id: self.before.map(Snowflake::from_datetime),
-        }
-    }
-
-    /// Whether a message with this ID was sent inside the time range.
-    pub fn contains(&self, id: Snowflake) -> bool {
-        let sent = id.created_at();
-        self.after.is_none_or(|after| sent >= after)
-            && self.before.is_none_or(|before| sent < before)
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +34,10 @@ pub struct JobOptions {
     pub max_rounds: u32,
     /// Only report what would be deleted.
     pub dry_run: bool,
+    /// Before deleting a message, replace its text with this and remove its
+    /// attachments, so the original is gone even where Discord keeps deleted
+    /// messages around. An empty text means random letters.
+    pub overwrite: Option<String>,
 }
 
 impl Default for JobOptions {
@@ -73,6 +47,7 @@ impl Default for JobOptions {
             search_delay_ms: 2000,
             max_rounds: 3,
             dry_run: false,
+            overwrite: None,
         }
     }
 }
@@ -139,6 +114,14 @@ pub enum Event {
     Failed {
         target_id: Snowflake,
         message_id: Snowflake,
+        error: String,
+    },
+    /// A channel from the data package cannot be reached (deleted, or no
+    /// longer accessible); its messages are skipped.
+    ChannelUnreachable {
+        target_id: Snowflake,
+        channel_id: Snowflake,
+        messages: u64,
         error: String,
     },
     /// Searching this target failed; the job continues with the next one.
@@ -240,6 +223,7 @@ pub async fn preview(
     control: &JobControl,
     mut on_entry: impl FnMut(usize, &PreviewEntry),
 ) -> Result<Vec<PreviewEntry>> {
+    filter.compile()?;
     let query = filter.search_query(me);
     let mut entries = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
@@ -247,6 +231,10 @@ pub async fn preview(
             control.sleep(options.search_delay_ms).await?;
         }
         control.checkpoint().await?;
+        let query = SearchQuery {
+            channel_ids: target.channels.clone(),
+            ..query.clone()
+        };
         let (count, error) = match control.guard(client.search(target.scope(), &query)).await? {
             Ok(response) => (Some(response.total_results), None),
             Err(Error::Unauthorized) => return Err(Error::Unauthorized),
@@ -263,6 +251,39 @@ pub async fn preview(
     Ok(entries)
 }
 
+/// Counts the matching messages of each target in a data package. Exact,
+/// except that pinned messages are only known while deleting.
+pub fn preview_package(
+    package: &Package,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+) -> Result<Vec<PreviewEntry>> {
+    let matcher = filter.compile_for_package()?;
+    Ok(targets
+        .iter()
+        .map(|target| {
+            let count = package
+                .channels_of(target)
+                .map(|channel| {
+                    channel
+                        .messages
+                        .iter()
+                        .filter(|m| {
+                            filter.contains(m.id) && matcher.matches(&m.to_message(channel.id, me))
+                        })
+                        .count() as u64
+                })
+                .sum();
+            PreviewEntry {
+                target: target.clone(),
+                count: Some(count),
+                error: None,
+            }
+        })
+        .collect())
+}
+
 /// Deletes the matching messages in `targets`. Progress is reported through
 /// `events`, ending with [`Event::Finished`].
 pub async fn run(
@@ -274,6 +295,80 @@ pub async fn run(
     control: &JobControl,
     events: mpsc::UnboundedSender<Event>,
 ) -> Summary {
+    run_from(
+        Source::Search,
+        client,
+        me,
+        targets,
+        filter,
+        options,
+        control,
+        events,
+    )
+    .await
+}
+
+/// Like [`run`], but takes the messages from a data package instead of
+/// searching for them. `targets` come from [`Package::targets`].
+#[allow(clippy::too_many_arguments)]
+pub async fn run_package(
+    client: &Client,
+    me: Snowflake,
+    package: &Package,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+    events: mpsc::UnboundedSender<Event>,
+) -> Summary {
+    run_from(
+        Source::Package(package),
+        client,
+        me,
+        targets,
+        filter,
+        options,
+        control,
+        events,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Search,
+    Package(&'a Package),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_from(
+    source: Source<'_>,
+    client: &Client,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+    events: mpsc::UnboundedSender<Event>,
+) -> Summary {
+    let compiled = match source {
+        Source::Search => filter.compile(),
+        Source::Package(package) => package
+            .check_owner(me)
+            .and_then(|()| filter.compile_for_package()),
+    };
+    let matcher = match compiled {
+        Ok(matcher) => matcher,
+        Err(err) => {
+            let summary = Summary {
+                stats: Stats::default(),
+                cancelled: false,
+                error: Some(err.to_string()),
+            };
+            let _ = events.send(Event::Finished(summary.clone()));
+            return summary;
+        }
+    };
     let notices = events.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
         let _ = notices.send(Event::Notice { notice });
@@ -287,6 +382,7 @@ pub async fn run(
         control,
         events: &events,
         query: filter.search_query(me),
+        matcher,
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
@@ -297,7 +393,10 @@ pub async fn run(
             name: target.name.clone(),
         });
         let mut stats = Stats::default();
-        let result = job.purge_target(target, &mut stats).await;
+        let result = match source {
+            Source::Search => job.purge_target(target, &mut stats).await,
+            Source::Package(package) => job.purge_known(target, package, &mut stats).await,
+        };
         total.add(stats);
         match result {
             Ok(()) => {}
@@ -336,6 +435,7 @@ struct Job<'a> {
     control: &'a JobControl,
     events: &'a mpsc::UnboundedSender<Event>,
     query: SearchQuery,
+    matcher: Matcher,
 }
 
 impl Job<'_> {
@@ -362,6 +462,7 @@ impl Job<'_> {
                 self.control.checkpoint().await?;
                 let query = SearchQuery {
                     max_id: cursor,
+                    channel_ids: target.channels.clone(),
                     ..self.query.clone()
                 };
                 let response = self
@@ -401,13 +502,94 @@ impl Job<'_> {
         Ok(())
     }
 
+    /// Deletes the matching messages of a data package, channel by channel.
+    /// Each channel is looked up first, so channels that are gone or out of
+    /// reach cost one request instead of one per message.
+    async fn purge_known(
+        &self,
+        target: &Target,
+        package: &Package,
+        stats: &mut Stats,
+    ) -> Result<()> {
+        let work: Vec<(Snowflake, Vec<Message>)> = package
+            .channels_of(target)
+            .filter_map(|channel| {
+                let messages: Vec<Message> = channel
+                    .messages
+                    .iter()
+                    .filter(|m| self.filter.contains(m.id))
+                    .map(|m| m.to_message(channel.id, self.me))
+                    .filter(|m| self.matcher.matches(m))
+                    .collect();
+                (!messages.is_empty()).then_some((channel.id, messages))
+            })
+            .collect();
+        self.emit(Event::TargetEstimate {
+            target_id: target.id,
+            total: work.iter().map(|(_, m)| m.len() as u64).sum(),
+        });
+
+        for (channel_id, messages) in work {
+            self.control.checkpoint().await?;
+            let pinned = match self.reach_channel(channel_id).await? {
+                Ok(pinned) => pinned,
+                Err(error) => {
+                    stats.skipped += messages.len() as u64;
+                    self.emit(Event::ChannelUnreachable {
+                        target_id: target.id,
+                        channel_id,
+                        messages: messages.len() as u64,
+                        error,
+                    });
+                    continue;
+                }
+            };
+            for mut message in messages {
+                message.pinned = pinned.contains(&message.id);
+                self.handle(target, message, stats).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that a channel still exists and can be reached, and returns its
+    /// pinned messages if those are to be kept. The inner error says why the
+    /// channel is out of reach.
+    async fn reach_channel(
+        &self,
+        channel_id: Snowflake,
+    ) -> Result<std::result::Result<HashSet<Snowflake>, String>> {
+        match self.control.guard(self.client.channel(channel_id)).await? {
+            Ok(_) => {}
+            Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+            Err(err) => return Ok(Err(err.to_string())),
+        }
+        if !self.filter.skip_pinned {
+            return Ok(Ok(HashSet::new()));
+        }
+        match self
+            .control
+            .guard(self.client.pinned_message_ids(channel_id))
+            .await?
+        {
+            Ok(pins) => Ok(Ok(pins.into_iter().collect())),
+            Err(Error::Unauthorized) => Err(Error::Unauthorized),
+            Err(err) => Ok(Err(format!("could not check its pinned messages: {err}"))),
+        }
+    }
+
     async fn handle(&self, target: &Target, message: Message, stats: &mut Stats) -> Result<()> {
         // The search already filters by author and time. Check again so a
         // misbehaving index can never make us delete anything else.
-        if message.author.id != self.me || !self.filter.contains(message.id) {
+        if message.author.id != self.me
+            || !self.filter.contains(message.id)
+            || !target.covers_channel(message.channel_id)
+        {
             return Ok(());
         }
-        let skip = if self.filter.skip_pinned && message.pinned {
+        let skip = if !self.matcher.matches(&message) {
+            Some(SkipReason::Excluded)
+        } else if self.filter.skip_pinned && message.pinned {
             Some(SkipReason::Pinned)
         } else if !delete::is_deletable_kind(message.kind) {
             Some(SkipReason::SystemMessage)
@@ -426,10 +608,30 @@ impl Job<'_> {
         }
 
         self.control.checkpoint().await?;
+        // From here on the requests are not abandoned when the job is stopped:
+        // Discord may already have carried them out, and the message must be
+        // counted. The job stops at the next checkpoint instead.
+        if let Some(text) = &self.options.overwrite {
+            let text = if text.trim().is_empty() {
+                random_text(message.id)
+            } else {
+                text.clone()
+            };
+            match self
+                .client
+                .overwrite_message(message.channel_id, message.id, &text)
+                .await
+            {
+                Ok(()) => {}
+                Err(Error::Unauthorized) => return Err(Error::Unauthorized),
+                // Deleting is what matters; it reports its own errors.
+                Err(err) => tracing::warn!(%err, "could not overwrite message {}", message.id),
+            }
+        }
         let result = self
-            .control
-            .guard(self.client.delete_message(message.channel_id, message.id))
-            .await?;
+            .client
+            .delete_message(message.channel_id, message.id)
+            .await;
         match delete::classify(result)? {
             Outcome::Deleted | Outcome::AlreadyGone => {
                 stats.deleted += 1;
@@ -471,6 +673,26 @@ impl Job<'_> {
     }
 }
 
+/// 8 to 24 random lowercase letters.
+fn random_text(seed: Snowflake) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()))
+        .unwrap_or(0);
+    // xorshift64; the state must not be zero.
+    let mut state = (seed.0 ^ nanos.rotate_left(32)) | 1;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let len = 8 + (next() % 17) as usize;
+    (0..len)
+        .map(|_| char::from(b'a' + (next() % 26) as u8))
+        .collect()
+}
+
 /// A one-line excerpt of a message for the progress log.
 fn preview_text(message: &Message) -> String {
     const MAX_CHARS: usize = 100;
@@ -487,5 +709,19 @@ fn preview_text(message: &Message) -> String {
         (true, 0) => "(no text)".to_owned(),
         (true, n) => format!("({n} attachment{})", if n == 1 { "" } else { "s" }),
         (false, _) => text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn random_text_is_letters_of_varying_length() {
+        let texts: Vec<String> = (0..50).map(|i| random_text(Snowflake(i))).collect();
+        assert!(texts
+            .iter()
+            .all(|t| (8..=24).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_lowercase())));
+        assert!(texts.iter().any(|t| t.len() != texts[0].len()));
     }
 }

@@ -3,6 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::filter::Has;
 use crate::models::{Message, SearchResponse};
 use crate::snowflake::Snowflake;
 
@@ -30,6 +31,12 @@ pub struct SearchQuery {
     pub min_id: Option<Snowflake>,
     /// Only messages with a smaller ID, i.e. sent earlier.
     pub max_id: Option<Snowflake>,
+    /// Words the text must contain.
+    pub content: Option<String>,
+    /// Only messages with any of these.
+    pub has: Vec<Has>,
+    /// Only messages in these channels of a server.
+    pub channel_ids: Vec<Snowflake>,
 }
 
 impl SearchQuery {
@@ -48,6 +55,15 @@ impl SearchQuery {
             if let Some(id) = id {
                 params.push((name, id.to_string()));
             }
+        }
+        if let Some(content) = &self.content {
+            params.push(("content", content.clone()));
+        }
+        for id in &self.channel_ids {
+            params.push(("channel_id", id.to_string()));
+        }
+        for has in &self.has {
+            params.push(("has", has.as_str().to_owned()));
         }
         params
     }

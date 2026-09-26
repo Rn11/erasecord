@@ -9,7 +9,7 @@ default-members = ["crates/core", "crates/cli", "app/src-tauri"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/Rn11/purgecord"
+repository = "https://github.com/Rn11/erasecord"
 
 # Small, fast release binaries (see https://tauri.app/concept/size/).
 [profile.release]

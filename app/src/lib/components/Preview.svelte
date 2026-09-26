@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { describeFilter, plural } from "$lib/format";
+  import { checksLocally, describeFilter, plural, targetLabel } from "$lib/format";
   import type { Filter, PreviewEntry, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -7,6 +7,7 @@
     targets,
     entries,
     counting,
+    exact = false,
     error,
     filter,
     onBack,
@@ -16,6 +17,8 @@
     targets: Target[];
     entries: PreviewEntry[];
     counting: boolean;
+    /** Counts come from the data package: exact, no search involved. */
+    exact?: boolean;
     error: string | null;
     filter: Filter;
     onBack: () => void;
@@ -37,6 +40,8 @@
       .join(" and "),
   );
   const failures = $derived(entries.filter((e) => e.error).length);
+  const approximate = $derived(!exact && checksLocally(filter));
+  const upTo = $derived(approximate || filter.skip_pinned ? "up to " : "");
 
   function confirmDelete() {
     dialog?.close();
@@ -60,7 +65,7 @@
       {@const entry = byId.get(target.id)}
       <div class="row" role="row">
         <Avatar name={target.name} url={target.icon_url} size={24} />
-        <span class="name" role="cell">{target.name}</span>
+        <span class="name" role="cell">{targetLabel(target)}</span>
         <span class="value num" role="cell">
           {#if !entry}
             {#if counting}<span class="spinner muted"></span>{/if}
@@ -84,12 +89,24 @@
   {/if}
   {#if !counting && failures > 0}
     <p class="callout warn small">
-      {plural(failures, "place")} could not be searched, usually because you no longer have access. purgecord tries again
+      {plural(failures, "place")} could not be searched, usually because you no longer have access. EraseCord tries again
       when you start.
     </p>
   {/if}
   {#if !counting && filter.skip_pinned && total > 0}
     <p class="small muted">Pinned messages are included in these numbers and will be kept.</p>
+  {/if}
+  {#if !counting && exact && total > 0}
+    <p class="small muted">
+      Counted from your data package. Messages deleted since you requested it are included and are counted as deleted
+      when EraseCord gets to them.
+    </p>
+  {/if}
+  {#if !counting && approximate && total > 0}
+    <p class="small muted">
+      The regular expression and “keep messages with” are checked while deleting, so fewer messages may be deleted than
+      counted here. A dry run shows exactly which ones.
+    </p>
   {/if}
 
   <footer>
@@ -100,19 +117,19 @@
       <span class="spacer"></span>
       <button class="btn" onclick={() => onStart(true)} disabled={total === 0}>List them first (dry run)</button>
       <button class="btn danger" onclick={() => dialog?.showModal()} disabled={total === 0}>
-        {total === 0 ? "Nothing to delete" : `Delete ${plural(total, "message")}`}
+        {total === 0 ? "Nothing to delete" : `Delete ${upTo}${plural(total, "message")}`}
       </button>
     {/if}
   </footer>
 </section>
 
 <dialog bind:this={dialog} class="card confirm" aria-labelledby="confirm-title">
-  <h2 id="confirm-title">Delete {plural(total, "message")}?</h2>
+  <h2 id="confirm-title">Delete {upTo}{plural(total, "message")}?</h2>
   <p>
     Your messages {describeFilter(filter)} will be deleted from {places}. <strong>This cannot be undone.</strong>
   </p>
   <p class="muted small">
-    This can take a while: purgecord deletes one message at a time. You can pause or stop at any point.
+    This can take a while: EraseCord deletes one message at a time. You can pause or stop at any point.
   </p>
   <div class="actions">
     <button class="btn" onclick={() => dialog?.close()}>Cancel</button>

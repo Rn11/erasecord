@@ -1,4 +1,4 @@
-//! HTTP client for the parts of the Discord API that purgecord needs.
+//! HTTP client for the parts of the Discord API that EraseCord needs.
 
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::models::{Channel, Guild, SearchResponse, User};
+use crate::models::{Channel, Guild, Message, Relationship, SearchResponse, User};
 use crate::ratelimit::{self, RateLimiter};
 use crate::search::{Scope, SearchQuery};
 use crate::snowflake::Snowflake;
@@ -19,12 +19,17 @@ use crate::snowflake::Snowflake;
 pub const DEFAULT_API_BASE: &str = "https://discord.com/api/v9";
 
 /// Requests with a user token normally come from a browser or the official
-/// client, so purgecord presents itself as a browser.
+/// client, so EraseCord presents itself as a browser.
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 /// Discord returns at most this many servers per request.
 const GUILD_PAGE_SIZE: usize = 200;
+/// Pinned messages per page, and a cap on pages (Discord allows 250 pins).
+const PIN_PAGE_SIZE: usize = 50;
+const MAX_PIN_PAGES: usize = 20;
+/// The old pins endpoint returns at most this many.
+const LEGACY_PIN_LIMIT: usize = 50;
 
 // 202 and 429 answers normally stop after a few seconds; these caps only keep
 // a misbehaving server from stalling a job forever.
@@ -159,36 +164,131 @@ impl Client {
         self.get("/users/@me/channels", &[]).await
     }
 
+    /// Friends, blocked users and friend requests.
+    pub async fn relationships(&self) -> Result<Vec<Relationship>> {
+        self.get("/users/@me/relationships", &[]).await
+    }
+
+    /// Opens the DM with a user, or returns it if it is open already. Only
+    /// the user's own DM list changes; the other person is not notified.
+    pub async fn open_dm(&self, user_id: Snowflake) -> Result<Channel> {
+        let body = serde_json::json!({ "recipient_id": user_id.to_string() });
+        let response = self
+            .send(Method::POST, "/users/@me/channels", &[], Some(&body))
+            .await?;
+        Ok(serde_json::from_slice(&response.bytes().await?)?)
+    }
+
+    /// The channels of a server that the user can see.
+    pub async fn guild_channels(&self, guild_id: Snowflake) -> Result<Vec<Channel>> {
+        self.get(&format!("/guilds/{guild_id}/channels"), &[]).await
+    }
+
+    pub async fn channel(&self, channel_id: Snowflake) -> Result<Channel> {
+        self.get(&format!("/channels/{channel_id}"), &[]).await
+    }
+
+    /// The IDs of all pinned messages in a channel, page by page. Falls back
+    /// to the old endpoint, which returns at most 50, where the paged one is
+    /// not available; with 50 or more pins that answer may be incomplete, so
+    /// it is an error.
+    pub async fn pinned_message_ids(&self, channel_id: Snowflake) -> Result<Vec<Snowflake>> {
+        let path = format!("/channels/{channel_id}/messages/pins");
+        let mut ids = Vec::new();
+        let mut before: Option<String> = None;
+        for _ in 0..MAX_PIN_PAGES {
+            let mut query = vec![("limit", PIN_PAGE_SIZE.to_string())];
+            if let Some(before) = &before {
+                query.push(("before", before.clone()));
+            }
+            let page: Value = match self.get(&path, &query).await {
+                Ok(page) => page,
+                // An unknown route, not an unknown channel (code 10003).
+                Err(Error::Api {
+                    status: 404,
+                    code: None | Some(0),
+                    ..
+                }) if before.is_none() => return self.legacy_pinned_ids(channel_id).await,
+                Err(err) => return Err(err),
+            };
+            let items = page["items"].as_array().cloned().unwrap_or_default();
+            ids.extend(
+                items
+                    .iter()
+                    .filter_map(|item| item["message"]["id"].as_str()?.parse().ok().map(Snowflake)),
+            );
+            before = items
+                .last()
+                .and_then(|item| item["pinned_at"].as_str())
+                .map(str::to_owned);
+            if !page["has_more"].as_bool().unwrap_or(false) || before.is_none() {
+                return Ok(ids);
+            }
+        }
+        Err(Error::Incomplete(format!(
+            "channel {channel_id} has too many pinned messages to check them all"
+        )))
+    }
+
+    async fn legacy_pinned_ids(&self, channel_id: Snowflake) -> Result<Vec<Snowflake>> {
+        let pins: Vec<Message> = self
+            .get(&format!("/channels/{channel_id}/pins"), &[])
+            .await?;
+        if pins.len() >= LEGACY_PIN_LIMIT {
+            return Err(Error::Incomplete(format!(
+                "channel {channel_id} has {LEGACY_PIN_LIMIT} or more pinned messages, which cannot all be checked"
+            )));
+        }
+        Ok(pins.into_iter().map(|m| m.id).collect())
+    }
+
     pub async fn search(&self, scope: Scope, query: &SearchQuery) -> Result<SearchResponse> {
         self.get(&scope.search_path(), &query.params()).await
     }
 
     pub async fn delete_message(&self, channel_id: Snowflake, message_id: Snowflake) -> Result<()> {
         let path = format!("/channels/{channel_id}/messages/{message_id}");
-        self.send(Method::DELETE, &path, &[]).await?;
+        self.send(Method::DELETE, &path, &[], None).await?;
+        Ok(())
+    }
+
+    /// Replaces the text of a message and removes its attachments.
+    pub async fn overwrite_message(
+        &self,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        content: &str,
+    ) -> Result<()> {
+        let path = format!("/channels/{channel_id}/messages/{message_id}");
+        let body = serde_json::json!({ "content": content, "attachments": [] });
+        self.send(Method::PATCH, &path, &[], Some(&body)).await?;
         Ok(())
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let response = self.send(Method::GET, path, query).await?;
+        let response = self.send(Method::GET, path, query, None).await?;
         let body = response.bytes().await?;
         Ok(serde_json::from_slice(&body)?)
     }
 
     /// Sends a request, waiting out rate limits and retrying transient errors.
-    async fn send(&self, method: Method, path: &str, query: &[(&str, String)]) -> Result<Response> {
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> Result<Response> {
         let url = format!("{}{}", self.inner.config.api_base, path);
         let max_retries = self.inner.config.max_retries;
         let (mut failures, mut index_waits, mut rate_limit_waits) = (0, 0, 0);
         loop {
             self.inner.limiter.ready().await;
-            let result = self
-                .inner
-                .http
-                .request(method.clone(), &url)
-                .query(query)
-                .send()
-                .await;
+            let mut request = self.inner.http.request(method.clone(), &url).query(query);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let result = request.send().await;
             let response = match result {
                 Ok(response) => response,
                 Err(err) if failures < max_retries && is_transient(&err) => {

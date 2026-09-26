@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    purgecord_app_lib::run()
+    erasecord_app_lib::run()
 }

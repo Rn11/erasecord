@@ -1,6 +1,6 @@
 //! Keeps requests within Discord's rate limits.
 //!
-//! purgecord sends one request at a time, so a single "not before" instant is
+//! EraseCord sends one request at a time, so a single "not before" instant is
 //! enough: it is pushed back whenever Discord reports an exhausted bucket or
 //! answers with 429.
 

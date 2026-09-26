@@ -105,6 +105,11 @@ export function applyEvent(run: RunState, event: JobEvent) {
       run.totals.failed++;
       log(run, "error", `Failed · ${name} · ${event.error}`);
       break;
+    case "channel_unreachable":
+      if (progress) progress.stats.skipped += event.messages;
+      run.totals.skipped += event.messages;
+      log(run, "warn", `Skipped ${event.messages.toLocaleString()} in a channel of ${name} that is out of reach: ${event.error}`);
+      break;
     case "target_failed":
       if (progress) {
         progress.status = "failed";

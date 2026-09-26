@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-use purgecord_core::{Client, ClientConfig, Snowflake, Target, TargetKind};
+use erasecord_core::{Client, ClientConfig, Snowflake, Target, TargetKind};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -17,6 +17,7 @@ pub const ME: u64 = 1000;
 pub const OTHER: u64 = 2000;
 pub const GUILD: u64 = 10;
 pub const GUILD_CHANNEL: u64 = 11;
+pub const GUILD_CHANNEL_2: u64 = 12;
 pub const DM_CHANNEL: u64 = 20;
 pub const TOKEN: &str = "test-token";
 
@@ -28,6 +29,10 @@ pub struct FakeMessage {
     pub author_id: u64,
     pub kind: u8,
     pub pinned: bool,
+    /// Text; `None` means "message <id>".
+    pub content: Option<String>,
+    /// File names of attachments.
+    pub files: Vec<String>,
     /// Only shows up in search results after this many searches.
     pub hidden_for_searches: usize,
 }
@@ -41,7 +46,22 @@ impl FakeMessage {
             author_id,
             kind: 0,
             pinned: false,
+            content: None,
+            files: Vec::new(),
             hidden_for_searches: 0,
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.content
+            .clone()
+            .unwrap_or_else(|| format!("message {}", self.id))
+    }
+
+    pub fn with_text(self, content: &str) -> Self {
+        FakeMessage {
+            content: Some(content.into()),
+            ..self
         }
     }
 
@@ -62,9 +82,21 @@ pub struct State {
     stale: Vec<FakeMessage>,
     /// Message ID -> (HTTP status, Discord error code) returned on delete.
     pub delete_errors: HashMap<u64, (u16, u64)>,
+    /// Search ignores `channel_id`, like a misbehaving index.
+    pub ignore_channel_filter: bool,
+    /// Only the old, unpaged pins endpoint exists (at most 50 pins).
+    pub legacy_pins: bool,
+    /// Channels that answer 404 Unknown Channel.
+    pub gone_channels: Vec<u64>,
     /// Servers whose search answers 403 Missing Access.
     pub forbidden_guilds: Vec<u64>,
     pub deleted: Vec<u64>,
+    /// Every edit: message ID and the JSON body.
+    pub edits: Vec<(u64, Value)>,
+    /// Requests in the order they arrived, e.g. "PATCH 12" or "DELETE 12".
+    pub log: Vec<String>,
+    /// How long a delete takes to answer.
+    pub delete_delay: Duration,
     pub search_calls: usize,
     pub delete_calls: usize,
 }
@@ -102,6 +134,26 @@ impl FakeDiscord {
         Mock::given(method("DELETE"))
             .and(path_regex(r"^/api/v9/channels/\d+/messages/\d+$"))
             .respond_with(DeleteResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+$"))
+            .respond_with(ChannelResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+/pins$"))
+            .respond_with(PinsResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v9/channels/\d+/messages/pins$"))
+            .respond_with(PagedPinsResponder(state.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path_regex(r"^/api/v9/channels/\d+/messages/\d+$"))
+            .respond_with(EditResponder(state.clone()))
             .mount(&server)
             .await;
         FakeDiscord { server, state }
@@ -145,6 +197,7 @@ pub fn guild_target() -> Target {
         id: Snowflake(GUILD),
         name: "Test server".into(),
         icon_url: None,
+        channels: Vec::new(),
     }
 }
 
@@ -154,6 +207,7 @@ pub fn dm_target() -> Target {
         id: Snowflake(DM_CHANNEL),
         name: "Friend".into(),
         icon_url: None,
+        channels: Vec::new(),
     }
 }
 
@@ -176,10 +230,10 @@ fn message_json(m: &FakeMessage) -> Value {
         "id": m.id.to_string(),
         "channel_id": m.channel_id.to_string(),
         "type": m.kind,
-        "content": format!("message {}", m.id),
+        "content": m.text(),
         "author": user_json(m.author_id, "someone"),
         "pinned": m.pinned,
-        "attachments": [],
+        "attachments": m.files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
         "hit": true,
     })
 }
@@ -203,6 +257,19 @@ impl Respond for SearchResponder {
         }
         let query: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
         let id_param = |name: &str| query.get(name).map(|v| v.parse::<u64>().unwrap());
+        let content = query.get("content").map(|c| c.to_lowercase());
+        let channels: Vec<u64> = request
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "channel_id" && !state.ignore_channel_filter)
+            .map(|(_, v)| v.parse().unwrap())
+            .collect();
+        let has: Vec<String> = request
+            .url
+            .query_pairs()
+            .filter(|(k, _)| k == "has")
+            .map(|(_, v)| v.into_owned())
+            .collect();
         let (author, min, max) = (
             id_param("author_id"),
             id_param("min_id"),
@@ -219,7 +286,16 @@ impl Respond for SearchResponder {
                 _ => m.channel_id == scope_id,
             })
             .filter(|m| author.is_none_or(|a| m.author_id == a))
+            .filter(|m| channels.is_empty() || channels.contains(&m.channel_id))
             .filter(|m| min.is_none_or(|min| m.id > min) && max.is_none_or(|max| m.id < max))
+            // Like Discord's search: word-based and fuzzy, so looser than EraseCord.
+            .filter(|m| {
+                content.as_deref().is_none_or(|c| {
+                    let text = m.text().to_lowercase();
+                    c.split_whitespace().any(|w| text.contains(w))
+                })
+            })
+            .filter(|m| has.is_empty() || (has.iter().any(|h| h == "file") && !m.files.is_empty()))
             .collect();
         found.sort_by_key(|m| std::cmp::Reverse(m.id));
         let page: Vec<Value> = found
@@ -243,6 +319,8 @@ impl Respond for DeleteResponder {
         let segments: Vec<&str> = request.url.path().split('/').collect();
         let channel_id: u64 = segments[4].parse().unwrap();
         let message_id: u64 = segments[6].parse().unwrap();
+        state.log.push(format!("DELETE {message_id}"));
+        let delay = state.delete_delay;
 
         if let Some(&(status, code)) = state.delete_errors.get(&message_id) {
             return error_json(status, code, "refused");
@@ -259,6 +337,123 @@ impl Respond for DeleteResponder {
             state.stale.push(message);
         }
         state.deleted.push(message_id);
-        ResponseTemplate::new(204)
+        ResponseTemplate::new(204).set_delay(delay)
+    }
+}
+
+struct ChannelResponder(Arc<Mutex<State>>);
+
+impl Respond for ChannelResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        if state.gone_channels.contains(&id) {
+            return error_json(404, 10003, "Unknown Channel");
+        }
+        let guild = state
+            .messages
+            .iter()
+            .find(|m| m.channel_id == id)
+            .and_then(|m| m.guild_id);
+        ResponseTemplate::new(200).set_body_json(json!({
+            "id": id.to_string(),
+            "type": if guild.is_some() { 0 } else { 1 },
+            "guild_id": guild.map(|g| g.to_string()),
+        }))
+    }
+}
+
+struct PinsResponder(Arc<Mutex<State>>);
+
+impl Respond for PinsResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let pins: Vec<Value> = state
+            .messages
+            .iter()
+            .filter(|m| m.channel_id == id && m.pinned)
+            .take(50)
+            .map(message_json)
+            .collect();
+        ResponseTemplate::new(200).set_body_json(pins)
+    }
+}
+
+/// Pins newest first; `pinned_at` is faked from the message ID's time.
+struct PagedPinsResponder(Arc<Mutex<State>>);
+
+impl Respond for PagedPinsResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let state = self.0.lock().unwrap();
+        if state.legacy_pins {
+            return error_json(404, 0, "404: Not Found");
+        }
+        let id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(4)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let query: HashMap<String, String> = request.url.query_pairs().into_owned().collect();
+        let limit: usize = query["limit"].parse().unwrap();
+        let before = query.get("before").cloned();
+        let mut pins: Vec<&FakeMessage> = state
+            .messages
+            .iter()
+            .filter(|m| m.channel_id == id && m.pinned)
+            .collect();
+        pins.sort_by_key(|m| std::cmp::Reverse(m.id));
+        let pinned_at = |m: &FakeMessage| Snowflake(m.id).created_at().to_rfc3339();
+        let rest: Vec<&FakeMessage> = pins
+            .into_iter()
+            .filter(|m| before.as_ref().is_none_or(|b| pinned_at(m) < *b))
+            .collect();
+        let items: Vec<Value> = rest
+            .iter()
+            .take(limit)
+            .map(|m| json!({ "pinned_at": pinned_at(m), "message": message_json(m) }))
+            .collect();
+        ResponseTemplate::new(200)
+            .set_body_json(json!({ "items": items, "has_more": rest.len() > limit }))
+    }
+}
+
+struct EditResponder(Arc<Mutex<State>>);
+
+impl Respond for EditResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let mut state = self.0.lock().unwrap();
+        let message_id: u64 = request
+            .url
+            .path()
+            .split('/')
+            .nth(6)
+            .unwrap()
+            .parse()
+            .unwrap();
+        state.log.push(format!("PATCH {message_id}"));
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        state.edits.push((message_id, body));
+        match state.messages.iter().find(|m| m.id == message_id) {
+            Some(m) => ResponseTemplate::new(200).set_body_json(message_json(m)),
+            None => error_json(404, 10008, "Unknown Message"),
+        }
     }
 }
