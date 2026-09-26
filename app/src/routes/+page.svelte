@@ -125,12 +125,15 @@
     targetsError = null;
     try {
       targets = await api.listTargets();
-      const known = new Set(targets.map((t) => t.id));
-      for (const id of [...selected]) if (!known.has(id)) selected.delete(id);
-      for (const id of [...channelPicks.keys()]) if (!known.has(id)) channelPicks.delete(id);
-      channelLists.clear();
       friends = null;
       friendsError = null;
+      // In package mode the lists show the package, not these targets.
+      if (!pkg) {
+        const known = new Set(targets.map((t) => t.id));
+        for (const id of [...selected]) if (!known.has(id)) selected.delete(id);
+        for (const id of [...channelPicks.keys()]) if (!known.has(id)) channelPicks.delete(id);
+        channelLists.clear();
+      }
     } catch (err) {
       targetsError = fail(err);
     } finally {
@@ -139,6 +142,8 @@
   }
 
   async function loadChannels(guildId: string) {
+    // The package's channels were filled in on import.
+    if (pkg) return;
     const current = channelLists.get(guildId);
     if (current && (current.loading || !current.error)) return;
     channelLists.set(guildId, { loading: true, error: null, channels: [] });
