@@ -1,4 +1,4 @@
-//! Core of purgecord: finds a user's own Discord messages through the search
+//! Core of EraseCord: finds a user's own Discord messages through the search
 //! API and deletes them, within a chosen time range and in chosen servers and
 //! DMs.
 //!

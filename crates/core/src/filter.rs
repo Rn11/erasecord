@@ -2,7 +2,7 @@
 //!
 //! Discord's search narrows the candidates down; every message it returns is
 //! then checked again here, so a fuzzy or misbehaving search can never make
-//! purgecord delete a message the filter does not describe.
+//! EraseCord delete a message the filter does not describe.
 
 use chrono::{DateTime, Utc};
 use regex::{Regex, RegexBuilder};
@@ -147,7 +147,7 @@ impl Filter {
             && self.before.is_none_or(|before| sent < before)
     }
 
-    /// Whether some conditions are only checked by purgecord, so Discord's
+    /// Whether some conditions are only checked by EraseCord, so Discord's
     /// counts can be higher than what will actually be deleted.
     pub fn checks_locally(&self) -> bool {
         self.pattern

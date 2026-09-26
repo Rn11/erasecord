@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, TimeZone, Utc};
-use purgecord_core::{Client, ClientConfig, Snowflake, Target, TargetKind};
+use erasecord_core::{Client, ClientConfig, Snowflake, Target, TargetKind};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path, path_regex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -281,7 +281,7 @@ impl Respond for SearchResponder {
             .filter(|m| author.is_none_or(|a| m.author_id == a))
             .filter(|m| channels.is_empty() || channels.contains(&m.channel_id))
             .filter(|m| min.is_none_or(|min| m.id > min) && max.is_none_or(|max| m.id < max))
-            // Like Discord's search: word-based and fuzzy, so looser than purgecord.
+            // Like Discord's search: word-based and fuzzy, so looser than EraseCord.
             .filter(|m| {
                 content.as_deref().is_none_or(|c| {
                     let text = m.text().to_lowercase();

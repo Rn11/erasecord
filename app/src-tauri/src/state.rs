@@ -3,7 +3,7 @@
 
 use std::sync::Mutex;
 
-use purgecord_core::{Client, JobControl, User};
+use erasecord_core::{Client, JobControl, User};
 
 use crate::commands::CommandError;
 
@@ -58,7 +58,7 @@ impl AppState {
 pub mod token_store {
     use keyring::Entry;
 
-    const SERVICE: &str = "purgecord";
+    const SERVICE: &str = "erasecord";
     const USER: &str = "discord-token";
 
     async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

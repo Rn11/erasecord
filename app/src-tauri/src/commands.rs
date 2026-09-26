@@ -1,8 +1,8 @@
 //! Commands the web frontend calls through `invoke`. All Discord traffic runs
 //! here in Rust, so the token never reaches the web view after login.
 
-use purgecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
-use purgecord_core::{Client, ClientConfig, Error, Friend, GuildChannel, Snowflake, Target, User};
+use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
+use erasecord_core::{Client, ClientConfig, Error, Friend, GuildChannel, Snowflake, Target, User};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
@@ -67,7 +67,7 @@ fn client_config() -> ClientConfig {
     let mut config = ClientConfig::default();
     // Lets `npm run tauri dev` talk to tools/fake_discord.py.
     #[cfg(debug_assertions)]
-    if let Ok(api_base) = std::env::var("PURGECORD_API_BASE") {
+    if let Ok(api_base) = std::env::var("ERASECORD_API_BASE") {
         config.api_base = api_base;
     }
     config
@@ -140,7 +140,7 @@ pub async fn logout(state: State<'_, AppState>) -> CommandResult<()> {
 #[tauri::command]
 pub async fn list_targets(state: State<'_, AppState>) -> CommandResult<Vec<Target>> {
     let session = state.session()?;
-    Ok(purgecord_core::list_targets(&session.client).await?)
+    Ok(erasecord_core::list_targets(&session.client).await?)
 }
 
 #[tauri::command]
@@ -149,19 +149,19 @@ pub async fn list_channels(
     guild_id: Snowflake,
 ) -> CommandResult<Vec<GuildChannel>> {
     let session = state.session()?;
-    Ok(purgecord_core::list_channels(&session.client, guild_id).await?)
+    Ok(erasecord_core::list_channels(&session.client, guild_id).await?)
 }
 
 #[tauri::command]
 pub async fn list_friends(state: State<'_, AppState>) -> CommandResult<Vec<Friend>> {
     let session = state.session()?;
-    Ok(purgecord_core::friends_without_dm(&session.client).await?)
+    Ok(erasecord_core::friends_without_dm(&session.client).await?)
 }
 
 #[tauri::command]
 pub async fn open_dm(state: State<'_, AppState>, user_id: Snowflake) -> CommandResult<Target> {
     let session = state.session()?;
-    Ok(purgecord_core::open_dm(&session.client, user_id).await?)
+    Ok(erasecord_core::open_dm(&session.client, user_id).await?)
 }
 
 #[tauri::command]

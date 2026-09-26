@@ -3,8 +3,8 @@ mod common;
 use std::time::Duration;
 
 use common::*;
-use purgecord_core::package::{PackageChannel, PackageMessage};
-use purgecord_core::{
+use erasecord_core::package::{PackageChannel, PackageMessage};
+use erasecord_core::{
     job, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake, Summary,
     Target, TargetKind,
 };

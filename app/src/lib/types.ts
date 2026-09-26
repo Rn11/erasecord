@@ -1,4 +1,4 @@
-// Mirrors the serde types of purgecord-core. IDs are strings because
+// Mirrors the serde types of erasecord-core. IDs are strings because
 // JavaScript numbers cannot hold 64-bit integers.
 
 export type Snowflake = string;

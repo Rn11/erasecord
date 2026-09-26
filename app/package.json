@@ -1,5 +1,5 @@
 {
-  "name": "purgecord-app",
+  "name": "erasecord-app",
   "version": "0.1.0",
   "description": "Desktop app to delete your own Discord messages",
   "type": "module",

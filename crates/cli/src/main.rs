@@ -1,4 +1,4 @@
-//! Command line front end for purgecord.
+//! Command line front end for EraseCord.
 
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process::ExitCode;
@@ -8,8 +8,8 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
-use purgecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
-use purgecord_core::{
+use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
+use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, Has, Notice,
     Snowflake, Target, TargetKind,
 };
@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 #[derive(Parser)]
 #[command(
-    name = "purgecord",
+    name = "erasecord",
     version,
     about = "Delete your own Discord messages from selected servers and DMs.",
     after_help = "The token is read from the DISCORD_TOKEN environment variable, or asked for \
@@ -42,7 +42,7 @@ enum Command {
     },
     /// List the channels of a server with their IDs, for --channel.
     Channels {
-        /// Server ID (see `purgecord list`).
+        /// Server ID (see `erasecord list`).
         #[arg(value_name = "SERVER_ID")]
         server: Snowflake,
         /// Print JSON instead of a table.
@@ -73,7 +73,7 @@ enum Command {
 
 #[derive(Args)]
 struct Selection {
-    /// Server or DM channel ID to clean up; repeat for several. See `purgecord list`.
+    /// Server or DM channel ID to clean up; repeat for several. See `erasecord list`.
     #[arg(short, long = "target", value_name = "ID")]
     targets: Vec<Snowflake>,
     /// All servers you are a member of.
@@ -84,11 +84,11 @@ struct Selection {
     all_dms: bool,
     /// Only this channel of a server; repeat for several. Narrows its server down to the
     /// given channels (the server does not need to be selected with --target). Threads
-    /// are separate channels. See `purgecord channels <SERVER_ID>`.
+    /// are separate channels. See `erasecord channels <SERVER_ID>`.
     #[arg(short, long = "channel", value_name = "ID")]
     channels: Vec<Snowflake>,
     /// The DM with this user, opening it if it is closed (only your own DM list changes).
-    /// Repeat for several. See `purgecord list --friends`.
+    /// Repeat for several. See `erasecord list --friends`.
     #[arg(long = "dm-with", value_name = "USER_ID")]
     dm_with: Vec<Snowflake>,
 }
@@ -110,7 +110,7 @@ struct Content {
     #[arg(long, value_name = "WORDS")]
     contains: Option<String>,
     /// Only messages whose text matches this regular expression (any case). Checked by
-    /// purgecord only, so the counts in the preview can be too high.
+    /// EraseCord only, so the counts in the preview can be too high.
     #[arg(long, value_name = "REGEX")]
     pattern: Option<String>,
     /// Only messages with any of these: link, file, image, video, sound, embed, sticker.
@@ -190,7 +190,7 @@ impl Command {
             && !selection.all_servers
             && !selection.all_dms
         {
-            bail!("choose what to clean up: --target <ID>, --channel <ID>, --dm-with <USER_ID>, --all-servers and/or --all-dms (see `purgecord list`)");
+            bail!("choose what to clean up: --target <ID>, --channel <ID>, --dm-with <USER_ID>, --all-servers and/or --all-dms (see `erasecord list`)");
         }
         build_filter(range, content, false)?;
         if needs_confirmation && !io::stdin().is_terminal() {
@@ -215,7 +215,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     cli.command.check()?;
     let mut config = ClientConfig::default();
     // For testing against a fake API server.
-    if let Ok(api_base) = std::env::var("PURGECORD_API_BASE") {
+    if let Ok(api_base) = std::env::var("ERASECORD_API_BASE") {
         config.api_base = api_base;
     }
     let client = Client::with_config(&read_token()?, config)?;
@@ -336,7 +336,7 @@ fn read_token() -> Result<String> {
         }
     }
     if !io::stdin().is_terminal() {
-        bail!("set DISCORD_TOKEN, or run purgecord in a terminal to type the token");
+        bail!("set DISCORD_TOKEN, or run erasecord in a terminal to type the token");
     }
     Ok(rpassword::prompt_password(
         "Discord token (input hidden): ",
@@ -366,7 +366,7 @@ async fn select(client: &Client, selection: &Selection) -> Result<Vec<Target>> {
         .iter()
         .find(|id| !available.iter().any(|t| t.id == **id))
     {
-        bail!("{unknown} is neither one of your servers nor an open DM (see `purgecord list`)");
+        bail!("{unknown} is neither one of your servers nor an open DM (see `erasecord list`)");
     }
     let mut chosen: Vec<Target> = available
         .iter()
@@ -742,7 +742,7 @@ mod tests {
     #[test]
     fn overwrite_text_is_optional() {
         let parse = |extra: &[&str]| {
-            let args = [&["purgecord", "delete", "--all-dms"][..], extra].concat();
+            let args = [&["erasecord", "delete", "--all-dms"][..], extra].concat();
             match Cli::try_parse_from(args).unwrap().command {
                 Command::Delete { options, .. } => options.overwrite,
                 _ => panic!("expected delete"),
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn content_flags_parse() {
         let cli = Cli::try_parse_from([
-            "purgecord",
+            "erasecord",
             "preview",
             "--all-dms",
             "--has",

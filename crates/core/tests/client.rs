@@ -3,8 +3,8 @@ mod common;
 use std::sync::{Arc, Mutex};
 
 use common::*;
-use purgecord_core::search::{Scope, SearchQuery};
-use purgecord_core::{
+use erasecord_core::search::{Scope, SearchQuery};
+use erasecord_core::{
     friends_without_dm, list_targets, open_dm, Client, Error, Has, Notice, Snowflake, TargetKind,
 };
 use serde_json::json;

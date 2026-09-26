@@ -1,4 +1,4 @@
-//! The subset of Discord's API objects that purgecord reads.
+//! The subset of Discord's API objects that EraseCord reads.
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub struct Guild {
     pub icon: Option<String>,
 }
 
-/// Values of [`Channel::kind`] that purgecord cares about.
+/// Values of [`Channel::kind`] that EraseCord cares about.
 pub mod channel_type {
     pub const TEXT: u8 = 0;
     pub const DM: u8 = 1;

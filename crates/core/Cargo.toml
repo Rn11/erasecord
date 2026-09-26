@@ -1,10 +1,10 @@
 [package]
-name = "purgecord-core"
+name = "erasecord-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core of purgecord: find and delete your own Discord messages"
+description = "Core of EraseCord: find and delete your own Discord messages"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }

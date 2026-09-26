@@ -85,7 +85,7 @@
   {/if}
   {#if !counting && failures > 0}
     <p class="callout warn small">
-      {plural(failures, "place")} could not be searched, usually because you no longer have access. purgecord tries again
+      {plural(failures, "place")} could not be searched, usually because you no longer have access. EraseCord tries again
       when you start.
     </p>
   {/if}
@@ -119,7 +119,7 @@
     Your messages {describeFilter(filter)} will be deleted from {places}. <strong>This cannot be undone.</strong>
   </p>
   <p class="muted small">
-    This can take a while: purgecord deletes one message at a time. You can pause or stop at any point.
+    This can take a while: EraseCord deletes one message at a time. You can pause or stop at any point.
   </p>
   <div class="actions">
     <button class="btn" onclick={() => dialog?.close()}>Cancel</button>

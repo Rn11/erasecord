@@ -35,7 +35,7 @@
 <div class="wrap">
   <form class="card login" onsubmit={submit}>
     <header>
-      <h1>purgecord</h1>
+      <h1>EraseCord</h1>
       <p class="muted">Delete your own Discord messages from the servers and DMs you choose.</p>
     </header>
 
@@ -46,8 +46,8 @@
     <div class="callout warn small risk">
       <strong>Before you start</strong>
       <p>
-        purgecord logs in with your user token. Automating a user account is against Discord's Terms of Service, so
-        Discord could limit or ban your account. purgecord only deletes, sends one request at a time and waits
+        EraseCord logs in with your user token. Automating a user account is against Discord's Terms of Service, so
+        Discord could limit or ban your account. EraseCord only deletes, sends one request at a time and waits
         whenever Discord asks it to, but the risk does not go away. Deleted messages cannot be restored.
       </p>
       <label class="check">
@@ -97,7 +97,7 @@
         <li>Select one of the requests. Under <em>Request Headers</em>, the value of <code>authorization</code> is your token.</li>
       </ol>
       <p class="muted">
-        Your token gives full access to your account: never share it. purgecord sends it only to discord.com.
+        Your token gives full access to your account: never share it. EraseCord sends it only to discord.com.
         Changing your password makes the token invalid.
       </p>
     </details>

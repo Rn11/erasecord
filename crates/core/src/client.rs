@@ -1,4 +1,4 @@
-//! HTTP client for the parts of the Discord API that purgecord needs.
+//! HTTP client for the parts of the Discord API that EraseCord needs.
 
 use std::fmt;
 use std::sync::{Arc, RwLock};
@@ -19,7 +19,7 @@ use crate::snowflake::Snowflake;
 pub const DEFAULT_API_BASE: &str = "https://discord.com/api/v9";
 
 /// Requests with a user token normally come from a browser or the official
-/// client, so purgecord presents itself as a browser.
+/// client, so EraseCord presents itself as a browser.
 pub const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
     AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 

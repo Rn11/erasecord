@@ -21,5 +21,5 @@ pub fn run() {
             commands::cancel_job,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running purgecord");
+        .expect("error while running EraseCord");
 }

@@ -335,7 +335,7 @@
         <summary class="small">Regular expression</summary>
         <label class="field regex">
           <input type="text" placeholder="e.g. ^(lol|ok)$" bind:value={content.pattern} spellcheck="false" aria-label="Regular expression" />
-          <span class="small muted">Case-insensitive. Checked by purgecord while deleting, so counts can be too high.</span>
+          <span class="small muted">Case-insensitive. Checked by EraseCord while deleting, so counts can be too high.</span>
         </label>
       </details>
     </fieldset>

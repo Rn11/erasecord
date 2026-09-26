@@ -1226,6 +1226,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "erasecord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "erasecord-core",
+ "rpassword",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "erasecord-app"
+version = "0.1.0"
+dependencies = [
+ "erasecord-core",
+ "keyring",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tokio",
+]
+
+[[package]]
+name = "erasecord-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "wiremock",
+ "zip",
+]
+
+[[package]]
 name = "erased-serde"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3254,51 +3299,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "purgecord"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "purgecord-core",
- "rpassword",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "purgecord-app"
-version = "0.1.0"
-dependencies = [
- "keyring",
- "purgecord-core",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tokio",
-]
-
-[[package]]
-name = "purgecord-core"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "wiremock",
- "zip",
 ]
 
 [[package]]

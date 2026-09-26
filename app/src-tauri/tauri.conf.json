@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "purgecord",
-  "mainBinaryName": "purgecord-app",
+  "productName": "EraseCord",
+  "mainBinaryName": "erasecord-app",
   "version": "0.1.0",
-  "identifier": "dev.purgecord.app",
+  "identifier": "dev.erasecord.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "purgecord",
+        "title": "EraseCord",
         "width": 1040,
         "height": 740,
         "minWidth": 720,
@@ -29,7 +29,7 @@
     "targets": "all",
     "category": "Utility",
     "shortDescription": "Delete your own Discord messages",
-    "longDescription": "purgecord deletes your own Discord messages from the servers and direct messages you choose, within a time range you choose.",
+    "longDescription": "EraseCord deletes your own Discord messages from the servers and direct messages you choose, within a time range you choose.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

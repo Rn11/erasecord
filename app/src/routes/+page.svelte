@@ -246,7 +246,7 @@
 <div class="app">
   {#if user}
     <header class="topbar">
-      <span class="brand">purgecord</span>
+      <span class="brand">EraseCord</span>
       <span class="spacer"></span>
       <span class="user">
         <Avatar

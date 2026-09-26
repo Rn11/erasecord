@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""A fake Discord API for trying purgecord without a real account.
+"""A fake Discord API for trying EraseCord without a real account.
 
     python3 tools/fake_discord.py            # listens on http://127.0.0.1:8765
-    PURGECORD_API_BASE=http://127.0.0.1:8765/api/v9 DISCORD_TOKEN=anything purgecord list
+    ERASECORD_API_BASE=http://127.0.0.1:8765/api/v9 DISCORD_TOKEN=anything EraseCord list
 
 It serves two servers and three DMs filled with messages from the last two
-years, answers the search and delete endpoints purgecord uses, and now and
+years, answers the search and delete endpoints EraseCord uses, and now and
 then replies with 429 so rate-limit handling can be watched. The token
 "bad" is rejected with 401. Only the Python standard library is needed.
 """
