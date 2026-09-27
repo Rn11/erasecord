@@ -295,8 +295,14 @@ impl StatsBuilder {
         s.first = Some(s.first.map_or(sent, |f| f.min(sent)));
         s.last = Some(s.last.map_or(sent, |l| l.max(sent)));
         let local = sent.with_timezone(&Local);
-        *self.months.entry(local.format("%Y-%m").to_string()).or_default() += 1;
-        *self.days.entry(local.format("%Y-%m-%d").to_string()).or_default() += 1;
+        *self
+            .months
+            .entry(local.format("%Y-%m").to_string())
+            .or_default() += 1;
+        *self
+            .days
+            .entry(local.format("%Y-%m-%d").to_string())
+            .or_default() += 1;
         self.week[local.weekday().num_days_from_monday() as usize][local.hour() as usize] += 1;
         for token in message.content.split_whitespace() {
             if token.contains("://") || token.starts_with('<') {
@@ -423,7 +429,11 @@ pub async fn scan(
             }
             on_event(ScanEvent::Counted {
                 target_id: target.id,
-                total: if known.complete { matching } else { known.total },
+                total: if known.complete {
+                    matching
+                } else {
+                    known.total
+                },
                 error: None,
             });
             on_event(ScanEvent::Read {
@@ -642,16 +652,37 @@ mod tests {
             ..Default::default()
         };
         let page1: Vec<Message> = (5..=10).rev().map(message).collect();
-        cache.store(&t, &query, None, &page1, Some(Snowflake((5 << 22) - 1)), Some(10));
+        cache.store(
+            &t,
+            &query,
+            None,
+            &page1,
+            Some(Snowflake((5 << 22) - 1)),
+            Some(10),
+        );
         let known = cache.lookup(&t, &query).unwrap();
         assert_eq!(known.messages.len(), 6);
         assert!(!known.complete);
         assert_eq!(known.total, 10);
         // A page that does not continue where the entry stopped is ignored.
-        cache.store(&t, &query, Some(Snowflake(3 << 22)), &[message(2)], None, None);
+        cache.store(
+            &t,
+            &query,
+            Some(Snowflake(3 << 22)),
+            &[message(2)],
+            None,
+            None,
+        );
         assert!(!cache.lookup(&t, &query).unwrap().complete);
         let page2: Vec<Message> = (1..=4).rev().map(message).collect();
-        cache.store(&t, &query, Some(Snowflake((5 << 22) - 1)), &page2, None, None);
+        cache.store(
+            &t,
+            &query,
+            Some(Snowflake((5 << 22) - 1)),
+            &page2,
+            None,
+            None,
+        );
         let known = cache.lookup(&t, &query).unwrap();
         assert!(known.complete);
         assert_eq!(known.messages.len(), 10);

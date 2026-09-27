@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use common::*;
 use erasecord_core::package::{PackageChannel, PackageMessage};
-use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot};
 use erasecord_core::scan::{self, MessageCache, ScanEvent};
+use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot};
 use erasecord_core::{
     job, Checkpoint, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake,
     Summary, Target, TargetKind,
@@ -1227,7 +1227,9 @@ async fn run_cached(
 
 #[tokio::test]
 async fn messages_found_while_counting_are_not_searched_again() {
-    let messages = (0..60).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let messages = (0..60)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
     let fake = FakeDiscord::start(State::with_messages(messages)).await;
     let cache = MessageCache::new();
     let filter = Filter::default();
@@ -1237,7 +1239,11 @@ async fn messages_found_while_counting_are_not_searched_again() {
     assert_eq!(searches, 4, "three pages of 25 and an empty one");
     assert!(events.iter().any(|e| matches!(
         e,
-        ScanEvent::Read { matching: 60, complete: true, .. }
+        ScanEvent::Read {
+            matching: 60,
+            complete: true,
+            ..
+        }
     )));
     let stats = events
         .iter()
@@ -1251,7 +1257,16 @@ async fn messages_found_while_counting_are_not_searched_again() {
 
     // Counting again, a dry run: no search at all.
     scan_into(&fake, &cache, &filter).await;
-    let dry = run_cached(&fake, &cache, &filter, JobOptions { dry_run: true, ..fast() }).await;
+    let dry = run_cached(
+        &fake,
+        &cache,
+        &filter,
+        JobOptions {
+            dry_run: true,
+            ..fast()
+        },
+    )
+    .await;
     assert_eq!(dry.stats.deleted, 60);
     assert_eq!(fake.state.lock().unwrap().search_calls, searches);
 
@@ -1269,7 +1284,9 @@ async fn messages_found_while_counting_are_not_searched_again() {
 
 #[tokio::test]
 async fn a_message_sent_after_counting_is_found_by_the_check() {
-    let messages = (0..10).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let messages = (0..10)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
     let fake = FakeDiscord::start(State::with_messages(messages)).await;
     let cache = MessageCache::new();
     let filter = Filter::default();
@@ -1287,11 +1304,22 @@ async fn a_message_sent_after_counting_is_found_by_the_check() {
 
 #[tokio::test]
 async fn a_dry_run_fills_the_cache_for_the_real_run() {
-    let messages = (0..30).map(|minute| FakeMessage::in_dm(minute, 0)).collect();
+    let messages = (0..30)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
     let fake = FakeDiscord::start(State::with_messages(messages)).await;
     let cache = MessageCache::new();
     let filter = Filter::default();
-    run_cached(&fake, &cache, &filter, JobOptions { dry_run: true, ..fast() }).await;
+    run_cached(
+        &fake,
+        &cache,
+        &filter,
+        JobOptions {
+            dry_run: true,
+            ..fast()
+        },
+    )
+    .await;
     let searches = fake.state.lock().unwrap().search_calls;
 
     let summary = run_cached(&fake, &cache, &filter, fast()).await;

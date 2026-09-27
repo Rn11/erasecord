@@ -33,10 +33,10 @@ pub use error::{Error, Result};
 pub use export::{ExportFormat, ExportWriter};
 pub use filter::{Filter, Has};
 pub use job::{Activity, Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
-pub use scan::{MessageCache, ScanEvent, ScanStats};
 pub use models::{Message, User};
 pub use package::{Package, PackageTarget};
 pub use resume::{Checkpoint, SavedRun};
+pub use scan::{MessageCache, ScanEvent, ScanStats};
 pub use snowflake::Snowflake;
 pub use targets::{
     friends_without_dm, list_channels, list_targets, open_dm, Friend, GuildChannel, Target,

@@ -21,8 +21,8 @@ use crate::filter::Matcher;
 use crate::models::Message;
 use crate::pace::Pace;
 use crate::package::Package;
-use crate::scan::MessageCache;
 use crate::resume::Checkpoint;
+use crate::scan::MessageCache;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
@@ -191,9 +191,14 @@ pub enum Event {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Activity {
     /// Asking how many messages a server or DM holds.
-    Counting { target_id: Snowflake },
+    Counting {
+        target_id: Snowflake,
+    },
     /// Reading messages page by page.
-    Reading { target_id: Snowflake, page: u32 },
+    Reading {
+        target_id: Snowflake,
+        page: u32,
+    },
     /// Searching for messages to delete (`again`: checking for messages
     /// the search returned late).
     Searching {
@@ -202,12 +207,23 @@ pub enum Activity {
         again: bool,
     },
     /// Using the messages found while counting.
-    UsingFound { target_id: Snowflake, messages: u64 },
-    Deleting { target_id: Snowflake },
-    BackingUp { target_id: Snowflake },
-    CheckingChannel { target_id: Snowflake },
+    UsingFound {
+        target_id: Snowflake,
+        messages: u64,
+    },
+    Deleting {
+        target_id: Snowflake,
+    },
+    BackingUp {
+        target_id: Snowflake,
+    },
+    CheckingChannel {
+        target_id: Snowflake,
+    },
     /// A longer break, to go easy on Discord.
-    Break { ms: u64 },
+    Break {
+        ms: u64,
+    },
     SealingBackup,
 }
 
@@ -749,7 +765,9 @@ impl Job<'_> {
         for round in 0..self.options.max_rounds.max(1) {
             let first_round = round == 0 && !complete;
             let mut cursor = match (first_round, resume_cursor) {
-                (true, Some(resume)) => Some(self.query.max_id.map_or(resume, |max| max.min(resume))),
+                (true, Some(resume)) => {
+                    Some(self.query.max_id.map_or(resume, |max| max.min(resume)))
+                }
                 _ => self.query.max_id,
             };
             let mut new_messages = 0;

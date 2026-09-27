@@ -98,9 +98,7 @@ mod tests {
     #[test]
     fn pauses_vary_around_the_configured_value() {
         let pace = Pace::new(2000, 3000);
-        let pauses: Vec<u128> = (0..50)
-            .map(|_| pace.before_search().as_millis())
-            .collect();
+        let pauses: Vec<u128> = (0..50).map(|_| pace.before_search().as_millis()).collect();
         assert!(pauses.iter().all(|&ms| (2250..=3750).contains(&ms)));
         assert!(pauses.iter().any(|&ms| ms != pauses[0]));
     }
