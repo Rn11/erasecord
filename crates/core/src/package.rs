@@ -167,26 +167,30 @@ impl Package {
             ));
         }
 
+        // Channels are independent: parse them on all cores.
+        let channels: Vec<(Snowflake, ChannelFiles)> = channels.into_iter().collect();
+        let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+        let chunk = channels.len().div_ceil(workers).max(1);
+        let results: Vec<Result<Vec<PackageChannel>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = channels
+                .chunks(chunk)
+                .map(|part| {
+                    let index = &index;
+                    scope.spawn(move || {
+                        part.iter()
+                            .filter_map(|(id, files)| parse_channel(*id, files, index).transpose())
+                            .collect::<Result<Vec<_>>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("parser thread"))
+                .collect()
+        });
         let mut parsed = Vec::with_capacity(channels.len());
-        for (id, files) in channels {
-            let mut messages = match (&files.json, &files.csv) {
-                (Some(json), _) => parse_json_messages(json)
-                    .map_err(|err| Error::Package(format!("messages of channel {id}: {err}")))?,
-                (None, Some(csv)) => parse_csv_messages(csv)
-                    .map_err(|err| Error::Package(format!("messages of channel {id}: {err}")))?,
-                (None, None) => continue,
-            };
-            if messages.is_empty() {
-                continue;
-            }
-            messages.sort_by_key(|m| std::cmp::Reverse(m.id));
-            messages.dedup_by_key(|m| m.id);
-            let info: Value = files
-                .channel
-                .as_deref()
-                .and_then(|data| serde_json::from_slice(data).ok())
-                .unwrap_or(Value::Null);
-            parsed.push(describe_channel(id, &info, index.get(&id), messages));
+        for result in results {
+            parsed.extend(result?);
         }
         parsed.sort_by_key(|c| std::cmp::Reverse(c.messages.first().map(|m| m.id)));
         Ok(Package {
@@ -385,6 +389,31 @@ fn collect_files(
     Ok(())
 }
 
+fn parse_channel(
+    id: Snowflake,
+    files: &ChannelFiles,
+    index: &HashMap<Snowflake, String>,
+) -> Result<Option<PackageChannel>> {
+    let mut messages = match (&files.json, &files.csv) {
+        (Some(json), _) => parse_json_messages(json)
+            .map_err(|err| Error::Package(format!("messages of channel {id}: {err}")))?,
+        (None, Some(csv)) => parse_csv_messages(csv)
+            .map_err(|err| Error::Package(format!("messages of channel {id}: {err}")))?,
+        (None, None) => return Ok(None),
+    };
+    if messages.is_empty() {
+        return Ok(None);
+    }
+    messages.sort_by_key(|m| std::cmp::Reverse(m.id));
+    messages.dedup_by_key(|m| m.id);
+    let info: Value = files
+        .channel
+        .as_deref()
+        .and_then(|data| serde_json::from_slice(data).ok())
+        .unwrap_or(Value::Null);
+    Ok(Some(describe_channel(id, &info, index.get(&id), messages)))
+}
+
 fn describe_channel(
     id: Snowflake,
     info: &Value,
@@ -454,26 +483,46 @@ fn id_of(value: &Value) -> Option<Snowflake> {
     }
 }
 
+/// A row of `messages.json`; other fields, like `Timestamp`, are not needed
+/// because the ID says when a message was sent.
+#[derive(Deserialize)]
+struct JsonRow {
+    #[serde(alias = "id", alias = "Id", default, deserialize_with = "any_id")]
+    #[serde(rename = "ID")]
+    id: Option<Snowflake>,
+    #[serde(alias = "contents", alias = "Content", alias = "content", default)]
+    #[serde(rename = "Contents")]
+    contents: Option<String>,
+    #[serde(alias = "attachments", default)]
+    #[serde(rename = "Attachments")]
+    attachments: Option<String>,
+}
+
+/// An ID written as a number or as text.
+fn any_id<'de, D: serde::Deserializer<'de>>(de: D) -> Result<Option<Snowflake>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Number(u64),
+        Text(String),
+        Other(serde::de::IgnoredAny),
+    }
+    Ok(match Id::deserialize(de)? {
+        Id::Number(n) => Some(Snowflake(n)),
+        Id::Text(s) => s.trim().parse().ok().map(Snowflake),
+        Id::Other(_) => None,
+    })
+}
+
 fn parse_json_messages(data: &[u8]) -> Result<Vec<PackageMessage>, String> {
-    let rows: Vec<Value> = serde_json::from_slice(data).map_err(|err| err.to_string())?;
-    let field = |row: &Value, name: &str| -> Value {
-        row.as_object()
-            .and_then(|o| o.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)))
-            .map(|(_, v)| v.clone())
-            .unwrap_or(Value::Null)
-    };
+    let rows: Vec<JsonRow> = serde_json::from_slice(data).map_err(|err| err.to_string())?;
     Ok(rows
-        .iter()
+        .into_iter()
         .filter_map(|row| {
             Some(PackageMessage {
-                id: id_of(&field(row, "id"))?,
-                content: field(row, "contents")
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned(),
-                attachments: parse_attachments(
-                    field(row, "attachments").as_str().unwrap_or_default(),
-                ),
+                id: row.id?,
+                content: row.contents.unwrap_or_default(),
+                attachments: parse_attachments(row.attachments.as_deref().unwrap_or_default()),
             })
         })
         .collect())
