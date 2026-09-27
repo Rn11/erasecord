@@ -115,7 +115,7 @@ pub struct Filter {
 }
 
 impl Filter {
-    pub(crate) fn search_query(&self, author: Snowflake) -> SearchQuery {
+    pub fn search_query(&self, author: Snowflake) -> SearchQuery {
         let words = self.words();
         SearchQuery {
             author_id: Some(author),

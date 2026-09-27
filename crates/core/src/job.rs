@@ -19,7 +19,9 @@ use crate::error::{Error, Result};
 pub use crate::filter::Filter;
 use crate::filter::Matcher;
 use crate::models::Message;
+use crate::pace::Pace;
 use crate::package::Package;
+use crate::scan::MessageCache;
 use crate::resume::Checkpoint;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
@@ -59,8 +61,9 @@ pub struct JobOptions {
 impl Default for JobOptions {
     fn default() -> Self {
         JobOptions {
-            delete_delay_ms: 1200,
-            search_delay_ms: 2000,
+            // Well below Discord's limits; see crate::pace.
+            delete_delay_ms: 2500,
+            search_delay_ms: 3000,
             max_rounds: 3,
             dry_run: false,
             overwrite: None,
@@ -176,7 +179,36 @@ pub enum Event {
     Notice {
         notice: Notice,
     },
+    /// What the job is doing right now, for a status line.
+    Activity {
+        activity: Activity,
+    },
     Finished(Summary),
+}
+
+/// What a job or a scan is busy with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Activity {
+    /// Asking how many messages a server or DM holds.
+    Counting { target_id: Snowflake },
+    /// Reading messages page by page.
+    Reading { target_id: Snowflake, page: u32 },
+    /// Searching for messages to delete (`again`: checking for messages
+    /// the search returned late).
+    Searching {
+        target_id: Snowflake,
+        page: u32,
+        again: bool,
+    },
+    /// Using the messages found while counting.
+    UsingFound { target_id: Snowflake, messages: u64 },
+    Deleting { target_id: Snowflake },
+    BackingUp { target_id: Snowflake },
+    CheckingChannel { target_id: Snowflake },
+    /// A longer break, to go easy on Discord.
+    Break { ms: u64 },
+    SealingBackup,
 }
 
 /// Lets another task pause, resume or cancel a running job. Cheap to clone.
@@ -221,7 +253,7 @@ impl JobControl {
     }
 
     /// Returns once the job is not paused, or `Error::Cancelled`.
-    async fn checkpoint(&self) -> Result<()> {
+    pub(crate) async fn checkpoint(&self) -> Result<()> {
         let mut paused = self.paused.subscribe();
         loop {
             if self.cancel.is_cancelled() {
@@ -238,7 +270,7 @@ impl JobControl {
     }
 
     /// Runs `future` unless the job is cancelled first.
-    async fn guard<T>(&self, future: impl Future<Output = T>) -> Result<T> {
+    pub(crate) async fn guard<T>(&self, future: impl Future<Output = T>) -> Result<T> {
         tokio::select! {
             biased;
             _ = self.cancel.cancelled() => Err(Error::Cancelled),
@@ -246,9 +278,11 @@ impl JobControl {
         }
     }
 
-    async fn sleep(&self, ms: u64) -> Result<()> {
-        self.guard(tokio::time::sleep(Duration::from_millis(ms)))
-            .await
+    pub(crate) async fn sleep_for(&self, duration: Duration) -> Result<()> {
+        if duration.is_zero() {
+            return Ok(());
+        }
+        self.guard(tokio::time::sleep(duration)).await
     }
 }
 
@@ -265,10 +299,11 @@ pub async fn preview(
 ) -> Result<Vec<PreviewEntry>> {
     filter.compile()?;
     let query = filter.search_query(me);
+    let pace = Pace::new(options.delete_delay_ms, options.search_delay_ms);
     let mut entries = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
         if index > 0 {
-            control.sleep(options.search_delay_ms).await?;
+            control.sleep_for(pace.before_search()).await?;
         }
         control.checkpoint().await?;
         let query = SearchQuery {
@@ -335,8 +370,26 @@ pub async fn run(
     control: &JobControl,
     events: mpsc::UnboundedSender<Event>,
 ) -> Summary {
+    run_with_cache(client, me, targets, filter, options, control, None, events).await
+}
+
+/// Like [`run`], but first deletes what an earlier [`crate::scan::scan`]
+/// (or dry run) found and put in `cache`, then only checks for anything
+/// new. Messages found while searching are added to the cache, deleted ones
+/// removed from it.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_cache(
+    client: &Client,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+    options: &JobOptions,
+    control: &JobControl,
+    cache: Option<&MessageCache>,
+    events: mpsc::UnboundedSender<Event>,
+) -> Summary {
     run_from(
-        Source::Search,
+        Source::Search(cache),
         client,
         me,
         targets,
@@ -376,7 +429,7 @@ pub async fn run_package(
 
 #[derive(Clone, Copy)]
 enum Source<'a> {
-    Search,
+    Search(Option<&'a MessageCache>),
     Package(&'a Package),
 }
 
@@ -392,7 +445,7 @@ async fn run_from(
     events: mpsc::UnboundedSender<Event>,
 ) -> Summary {
     let compiled = match source {
-        Source::Search => filter.compile(),
+        Source::Search(_) => filter.compile(),
         Source::Package(package) => package
             .check_owner(me)
             .and_then(|()| filter.compile_for_package()),
@@ -443,8 +496,13 @@ async fn run_from(
             return summary;
         }
     };
+    let pace = Arc::new(Pace::new(options.delete_delay_ms, options.search_delay_ms));
     let notices = events.clone();
+    let slow = pace.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
+        if matches!(notice, Notice::RateLimited { .. }) {
+            slow.slow_down();
+        }
         let _ = notices.send(Event::Notice { notice });
     })));
 
@@ -460,6 +518,11 @@ async fn run_from(
         backup,
         vault: vault.as_ref(),
         pending: Mutex::new(Vec::new()),
+        pace,
+        cache: match source {
+            Source::Search(cache) => cache,
+            Source::Package(_) => None,
+        },
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
@@ -474,7 +537,7 @@ async fn run_from(
         });
         let mut stats = Stats::default();
         let mut result = match source {
-            Source::Search => job.purge_target(target, &mut stats).await,
+            Source::Search(_) => job.purge_target(target, &mut stats).await,
             Source::Package(package) => job.purge_known(target, package, &mut stats).await,
         };
         // Messages waiting for their part of the encrypted backup.
@@ -506,6 +569,9 @@ async fn run_from(
     drop(job);
 
     if let Some(vault) = vault {
+        let _ = events.send(Event::Activity {
+            activity: Activity::SealingBackup,
+        });
         let finished = stopped_by.is_none();
         let outcome = tokio::task::spawn_blocking(move || {
             if finished {
@@ -566,6 +632,9 @@ struct Job<'a> {
     /// Backed-up messages waiting for their part to be sealed before they
     /// are deleted.
     pending: Mutex<Vec<(Message, Vec<String>)>>,
+    pace: Arc<Pace>,
+    /// Messages found earlier, and where found ones are kept.
+    cache: Option<&'a MessageCache>,
 }
 
 impl Job<'_> {
@@ -576,6 +645,10 @@ impl Job<'_> {
     /// Dealt with by the run being continued.
     fn already_done(&self, id: Snowflake) -> bool {
         self.resume().is_some_and(|r| r.done.contains(&id))
+    }
+
+    fn activity(&self, activity: Activity) {
+        self.emit(Event::Activity { activity });
     }
 
     fn emit(&self, event: Event) {
@@ -626,60 +699,107 @@ impl Job<'_> {
     /// Then searches again from the top, because the index can lag behind;
     /// stops once a round turns up nothing new.
     async fn purge_target(&self, target: &Target, stats: &mut Stats) -> Result<()> {
-        let scope = target.scope();
         let mut seen = HashSet::new();
         let mut searched = false;
+        let base = SearchQuery {
+            channel_ids: target.channels.clone(),
+            ..self.query.clone()
+        };
+        // Messages found while counting (or in a dry run) need no searching.
+        let known = if self.resume().is_none() {
+            self.cache.and_then(|cache| cache.lookup(target, &base))
+        } else {
+            None
+        };
+        let mut read_on = None;
+        if let Some(known) = &known {
+            self.activity(Activity::UsingFound {
+                target_id: target.id,
+                messages: known.messages.len() as u64,
+            });
+            self.emit(Event::TargetEstimate {
+                target_id: target.id,
+                total: if known.complete {
+                    known.messages.len() as u64
+                } else {
+                    known.total
+                },
+            });
+            for message in &known.messages {
+                seen.insert(message.id);
+                self.handle(target, message.clone(), stats).await?;
+            }
+            if !known.complete {
+                read_on = known.cursor;
+            }
+        }
         // A continued run starts below the oldest message it dealt with;
         // later rounds start from the top again, as always.
         let resume_cursor = self
             .resume()
             .and_then(|r| r.cursors.get(&target.id))
-            .copied();
+            .copied()
+            .or(read_on);
+        let complete = known.as_ref().is_some_and(|k| k.complete);
+        // Everything was found before: a dry run is done, a real run only
+        // checks whether anything new turned up.
+        if complete && self.options.dry_run {
+            return Ok(());
+        }
         for round in 0..self.options.max_rounds.max(1) {
-            let mut cursor = match (round, resume_cursor) {
-                (0, Some(resume)) => Some(self.query.max_id.map_or(resume, |max| max.min(resume))),
+            let first_round = round == 0 && !complete;
+            let mut cursor = match (first_round, resume_cursor) {
+                (true, Some(resume)) => Some(self.query.max_id.map_or(resume, |max| max.min(resume))),
                 _ => self.query.max_id,
             };
             let mut new_messages = 0;
+            let mut page = 0;
             loop {
                 if searched {
-                    self.control.sleep(self.options.search_delay_ms).await?;
+                    self.control.sleep_for(self.pace.before_search()).await?;
                 }
                 self.control.checkpoint().await?;
-                let query = SearchQuery {
-                    max_id: cursor,
-                    channel_ids: target.channels.clone(),
-                    ..self.query.clone()
-                };
-                let response = self
-                    .control
-                    .guard(self.client.search(scope, &query))
-                    .await??;
+                page += 1;
+                self.activity(Activity::Searching {
+                    target_id: target.id,
+                    page,
+                    again: !first_round,
+                });
+                let (hits, next, total) = crate::scan::search_page(
+                    self.client,
+                    self.cache,
+                    target,
+                    &self.query,
+                    cursor,
+                    self.control,
+                )
+                .await?;
                 if !searched {
                     searched = true;
-                    self.emit(Event::TargetEstimate {
-                        target_id: target.id,
-                        total: response.total_results,
-                    });
+                    if known.is_none() {
+                        self.emit(Event::TargetEstimate {
+                            target_id: target.id,
+                            total,
+                        });
+                    }
                 }
-
-                let hits = response.into_hits();
-                let Some(oldest) = hits.last().map(|m| m.id) else {
-                    break;
-                };
+                let mut new_on_page = 0;
                 for message in hits {
                     if seen.insert(message.id) && !self.already_done(message.id) {
-                        new_messages += 1;
+                        new_on_page += 1;
                         self.handle(target, message, stats).await?;
                     }
                 }
-                if oldest.0 == 0 {
+                new_messages += new_on_page;
+                let Some(next) = next else {
+                    break;
+                };
+                // Checking a place whose messages were all found before:
+                // a page with nothing new means there is nothing more.
+                if complete && new_on_page == 0 {
                     break;
                 }
-                cursor = Some(Snowflake(oldest.0 - 1));
-                if self.query.min_id.is_some_and(|min| oldest <= min) {
-                    break;
-                }
+                cursor = Some(next);
             }
             if new_messages == 0 || self.options.dry_run {
                 break;
@@ -717,6 +837,9 @@ impl Job<'_> {
 
         for (channel_id, messages) in work {
             self.control.checkpoint().await?;
+            self.activity(Activity::CheckingChannel {
+                target_id: target.id,
+            });
             let pinned = match self.reach_channel(channel_id).await? {
                 Ok(pinned) => pinned,
                 Err(error) => {
@@ -791,6 +914,9 @@ impl Job<'_> {
         if let Some(vault) = self.vault {
             if !message.attachments.is_empty() {
                 self.control.checkpoint().await?;
+                self.activity(Activity::BackingUp {
+                    target_id: target.id,
+                });
                 let saved = match self.control.guard(vault.add(self.client, &message)).await? {
                     Ok(saved) => saved,
                     Err(error) => {
@@ -821,6 +947,9 @@ impl Job<'_> {
         let saved = match &self.backup {
             Some(backup) if !message.attachments.is_empty() => {
                 self.control.checkpoint().await?;
+                self.activity(Activity::BackingUp {
+                    target_id: target.id,
+                });
                 match self
                     .control
                     .guard(backup.save(self.client, &message))
@@ -859,6 +988,9 @@ impl Job<'_> {
         stats: &mut Stats,
     ) -> Result<()> {
         self.control.checkpoint().await?;
+        self.activity(Activity::Deleting {
+            target_id: target.id,
+        });
         // From here on the requests are not abandoned when the job is stopped:
         // Discord may already have carried them out, and the message must be
         // counted. The job stops at the next checkpoint instead.
@@ -886,6 +1018,9 @@ impl Job<'_> {
         match delete::classify(result)? {
             Outcome::Deleted | Outcome::AlreadyGone => {
                 stats.deleted += 1;
+                if let Some(cache) = self.cache {
+                    cache.forget(target.id, &[message.id]);
+                }
                 self.deleted(target, &message, false, saved);
             }
             Outcome::Skipped(reason) => {
@@ -901,7 +1036,13 @@ impl Job<'_> {
                 });
             }
         }
-        self.control.sleep(self.options.delete_delay_ms).await
+        let (pause, long) = self.pace.after_delete();
+        if long {
+            self.activity(Activity::Break {
+                ms: pause.as_millis() as u64,
+            });
+        }
+        self.control.sleep_for(pause).await
     }
 
     fn deleted(&self, target: &Target, message: &Message, dry_run: bool, saved: Vec<String>) {
