@@ -12,6 +12,7 @@ pub mod delete;
 pub mod error;
 pub mod export;
 pub mod filter;
+pub mod insights;
 pub mod inspect;
 pub mod job;
 pub mod models;
@@ -20,7 +21,7 @@ mod ratelimit;
 pub mod resume;
 pub mod search;
 pub mod snowflake;
-pub mod stats;
+mod stopwords;
 pub mod targets;
 
 pub use client::{Client, ClientConfig, Notice, NoticeSink};

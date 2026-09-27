@@ -74,6 +74,8 @@ pub struct PackageChannel {
     pub guild: Option<(Snowflake, String)>,
     /// Newest first.
     pub messages: Vec<PackageMessage>,
+    /// For DMs and group DMs: the people in it, including the owner.
+    pub recipients: Vec<Snowflake>,
 }
 
 /// A server or DM in the package, as a [`Target`] with some numbers.
@@ -462,12 +464,17 @@ fn describe_channel(
                 _ => format!("Conversation {id}"),
             }),
     };
+    let recipients = info["recipients"]
+        .as_array()
+        .map(|list| list.iter().filter_map(id_of).collect())
+        .unwrap_or_default();
     PackageChannel {
         id,
         kind,
         name,
         guild,
         messages,
+        recipients,
     }
 }
 

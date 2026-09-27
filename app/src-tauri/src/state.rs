@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use erasecord_core::insights::Index;
 use erasecord_core::{Client, Event, JobControl, Package, User};
 
 use crate::commands::CommandError;
@@ -14,6 +15,9 @@ pub struct Session {
     pub me: User,
 }
 
+/// A data package, where it was read from, and its index for Insights.
+pub type LoadedPackage = (Arc<Package>, PathBuf, Arc<Index>);
+
 #[derive(Default)]
 pub struct AppState {
     session: Mutex<Option<Session>>,
@@ -21,7 +25,7 @@ pub struct AppState {
     job: Mutex<Option<JobControl>>,
     /// The imported data package, if any. Kept here: it is too big to send
     /// to the web view.
-    package: Mutex<Option<(Arc<Package>, PathBuf)>>,
+    package: Mutex<Option<LoadedPackage>>,
     /// The events of the last clean-up that an export needs: names and
     /// deleted messages.
     last_run: Mutex<Vec<Event>>,
@@ -74,10 +78,23 @@ impl AppState {
 
     /// The imported package and where it was read from.
     pub fn package(&self) -> Option<(Arc<Package>, PathBuf)> {
-        self.package.lock().unwrap().clone()
+        self.package
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(package, path, _)| (package.clone(), path.clone()))
     }
 
-    pub fn set_package(&self, package: Option<(Arc<Package>, PathBuf)>) {
+    /// The package's index for Insights.
+    pub fn index(&self) -> Option<Arc<Index>> {
+        self.package
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, _, index)| index.clone())
+    }
+
+    pub fn set_package(&self, package: Option<LoadedPackage>) {
         *self.package.lock().unwrap() = package;
     }
 }

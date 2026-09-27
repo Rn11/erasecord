@@ -4,8 +4,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use erasecord_core::insights::{
+    Index, Info, LinksReport, Overview, PlacesReport, Scope, SearchResult, Timeline, WordsReport,
+};
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry, Stats};
-use erasecord_core::stats::Statistics;
 use erasecord_core::{
     Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
     PackageTarget, SavedRun, Snowflake, Target, TargetKind, User,
@@ -235,6 +237,8 @@ pub async fn start_package_job(
     options: JobOptions,
 ) -> CommandResult<()> {
     let package = state.package().ok_or_else(CommandError::no_package)?;
+    // The package may have been opened before logging in.
+    package.0.check_owner(state.session()?.me.id)?;
     spawn_job(app, &state, Some(package), targets, filter, options, None)
 }
 
@@ -452,19 +456,34 @@ pub struct PackageSummary {
 }
 
 /// Reads a data package (a .zip file or an extracted folder) and keeps it
-/// for [`preview_package`] and [`start_package_job`].
+/// for [`preview_package`], [`start_package_job`] and Insights. Works
+/// without logging in; then nothing is sent anywhere, and the servers and
+/// DMs keep the names from the package.
 #[tauri::command]
 pub async fn import_package(
     state: State<'_, AppState>,
     path: PathBuf,
 ) -> CommandResult<PackageSummary> {
-    let session = state.session()?;
+    let session = state.session().ok();
     let source = path.clone();
-    let package = tauri::async_runtime::spawn_blocking(move || Package::open(&source))
-        .await
-        .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
-    package.check_owner(session.me.id)?;
+    let (package, index) = tauri::async_runtime::spawn_blocking(move || {
+        let package = Arc::new(Package::open(&source)?);
+        let index = Arc::new(Index::build(package.clone(), &chrono::Local));
+        Ok::<_, Error>((package, index))
+    })
+    .await
+    .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
     let mut targets = package.targets();
+    let Some(session) = session else {
+        let summary = PackageSummary {
+            messages: package.message_count(),
+            targets,
+            left_servers: Vec::new(),
+        };
+        state.set_package(Some((package, path, index)));
+        return Ok(summary);
+    };
+    package.check_owner(session.me.id)?;
     // The package knows the people in a DM only by ID; open conversations
     // lend their current names and pictures. Best effort: a failure here
     // leaves the package's names.
@@ -496,7 +515,7 @@ pub async fn import_package(
         targets,
         left_servers,
     };
-    state.set_package(Some((Arc::new(package), path)));
+    state.set_package(Some((package, path, index)));
     Ok(summary)
 }
 
@@ -514,6 +533,7 @@ pub async fn preview_package(
 ) -> CommandResult<Vec<PreviewEntry>> {
     let session = state.session()?;
     let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
+    package.check_owner(session.me.id)?;
     Ok(job::preview_package(
         &package,
         session.me.id,
@@ -522,16 +542,70 @@ pub async fn preview_package(
     )?)
 }
 
-/// Statistics about the imported package, in the given time zone.
-#[tauri::command]
-pub async fn package_stats(
-    state: State<'_, AppState>,
-    utc_offset_minutes: i32,
-) -> CommandResult<Statistics> {
-    let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
-    tauri::async_runtime::spawn_blocking(move || Statistics::of(&package, utc_offset_minutes))
+/// Runs an Insights query on the package's index, off the main thread.
+async fn insight<T: Send + 'static>(
+    state: &AppState,
+    query: impl FnOnce(&Index) -> T + Send + 'static,
+) -> CommandResult<T> {
+    let index = state.index().ok_or_else(CommandError::no_package)?;
+    tauri::async_runtime::spawn_blocking(move || query(&index))
         .await
         .map_err(|err| CommandError::other(err.to_string()))
+}
+
+#[tauri::command]
+pub async fn insights_info(state: State<'_, AppState>) -> CommandResult<Info> {
+    insight(&state, |index| index.info()).await
+}
+
+#[tauri::command]
+pub async fn insights_overview(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<Overview> {
+    insight(&state, move |index| index.overview(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_time(state: State<'_, AppState>, scope: Scope) -> CommandResult<Timeline> {
+    insight(&state, move |index| index.timeline(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_places(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<PlacesReport> {
+    insight(&state, move |index| index.places(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_words(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<WordsReport> {
+    insight(&state, move |index| index.words(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_links(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<LinksReport> {
+    insight(&state, move |index| index.links(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_search(
+    state: State<'_, AppState>,
+    scope: Scope,
+    query: String,
+    limit: usize,
+) -> CommandResult<SearchResult> {
+    insight(&state, move |index| {
+        index.search(&scope, &query, limit.min(500))
+    })
+    .await
 }
 
 #[tauri::command]

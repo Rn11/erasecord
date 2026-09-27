@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
+use erasecord_core::insights::Index;
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
@@ -73,13 +74,36 @@ enum Command {
         #[command(flatten)]
         options: DeleteOptions,
     },
-    /// Statistics about the messages in your Discord data package: when and where you
-    /// wrote. Needs no token.
+    /// Statistics about the messages in your Discord data package: when, where and
+    /// what you wrote. Needs no token; nothing is sent anywhere.
     Stats {
         /// The data package (.zip or extracted folder).
         #[arg(value_name = "PATH")]
         package: PathBuf,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// What to show.
+        #[arg(long, value_enum, default_value = "overview")]
+        section: Section,
         /// Print JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Find your messages in the data package that contain all of these words, in
+    /// any case (the same rule as `delete --contains`). Needs no token.
+    Search {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// The words to look for.
+        #[arg(value_name = "WORDS", required = true)]
+        words: Vec<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Show at most this many messages, newest first.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print JSON instead of a list.
         #[arg(long)]
         json: bool,
     },
@@ -115,6 +139,44 @@ enum Command {
         #[arg(short, long)]
         verbose: bool,
     },
+}
+
+#[derive(Args, Clone)]
+struct ScopeArgs {
+    /// Only from this day on (YYYY-MM-DD, local time).
+    #[arg(long, value_name = "DATE")]
+    from: Option<NaiveDate>,
+    /// Only up to and including this day.
+    #[arg(long, value_name = "DATE")]
+    to: Option<NaiveDate>,
+    /// Only this server or DM (ID from `erasecord list --package`); repeat for several.
+    #[arg(long = "place", value_name = "ID")]
+    places: Vec<u64>,
+}
+
+impl ScopeArgs {
+    fn scope(&self) -> erasecord_core::insights::Scope {
+        erasecord_core::insights::Scope {
+            from: self.from,
+            to: self.to,
+            places: self.places.iter().copied().map(Snowflake).collect(),
+            channels: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Section {
+    /// The servers and DMs, time range and totals.
+    Info,
+    Overview,
+    /// Per month, week, weekday and hour.
+    Time,
+    Places,
+    /// Words, emoji, mentions and message lengths.
+    Words,
+    /// Links and attachments.
+    Links,
 }
 
 #[derive(Args)]
@@ -238,7 +300,7 @@ impl Command {
             Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
                 selection.package.as_deref()
             }
-            Command::Stats { package, .. } => Some(package),
+            Command::Stats { package, .. } | Command::Search { package, .. } => Some(package),
             Command::Channels { .. }
             | Command::Resume { .. }
             | Command::InspectPackage { .. }
@@ -253,6 +315,7 @@ impl Command {
             | Command::Channels { .. }
             | Command::Resume { .. }
             | Command::Stats { .. }
+            | Command::Search { .. }
             | Command::InspectPackage { .. }
             | Command::AnonymizePackage { .. } => return Ok(()),
             Command::Preview {
@@ -352,7 +415,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let offline = package.is_some()
         && matches!(
             cli.command,
-            Command::List { .. } | Command::Preview { .. } | Command::Stats { .. }
+            Command::List { .. }
+                | Command::Preview { .. }
+                | Command::Stats { .. }
+                | Command::Search { .. }
         );
     let session = if offline {
         None
@@ -377,14 +443,57 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Command::InspectPackage { .. } | Command::AnonymizePackage { .. } => {
             unreachable!("handled before logging in")
         }
-        Command::Stats { json, .. } => {
-            let package = package.expect("package loaded");
-            let offset = chrono::Local::now().offset().local_minus_utc() / 60;
-            let stats = erasecord_core::stats::Statistics::of(&package, offset);
+        Command::Stats {
+            scope,
+            section,
+            json,
+            ..
+        } => {
+            let index = Index::build(package.expect("package loaded"), &Local);
+            let scope = scope.scope();
+            let places = index.info().places;
+            let print = |value: serde_json::Value| -> Result<()> {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            };
+            match section {
+                Section::Info => print(serde_json::to_value(index.info())?)?,
+                Section::Overview if json => print(serde_json::to_value(index.overview(&scope))?)?,
+                Section::Overview => print_overview(&index.overview(&scope), &places),
+                Section::Time if json => print(serde_json::to_value(index.timeline(&scope))?)?,
+                Section::Time => print_timeline(&index.timeline(&scope)),
+                Section::Places if json => print(serde_json::to_value(index.places(&scope))?)?,
+                Section::Places => print_places(&index.places(&scope), &places),
+                Section::Words if json => print(serde_json::to_value(index.words(&scope))?)?,
+                Section::Words => print_words(&index.words(&scope)),
+                Section::Links if json => print(serde_json::to_value(index.links(&scope))?)?,
+                Section::Links => print_links(&index.links(&scope)),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Search {
+            words,
+            scope,
+            limit,
+            json,
+            ..
+        } => {
+            let index = Index::build(package.expect("package loaded"), &Local);
+            let found = index.search(&scope.scope(), &words.join(" "), limit);
             if json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
-            } else {
-                print_stats(&stats, &package.targets());
+                println!("{}", serde_json::to_string_pretty(&found)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let places = index.info().places;
+            println!("{} messages found", found.total);
+            for m in &found.messages {
+                println!(
+                    "\n{}  {} · {}\n  {}",
+                    m.sent_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    places[m.place].name,
+                    m.channel,
+                    m.text.replace('\n', "\n  ")
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -1119,72 +1228,147 @@ fn parse_age(input: &str) -> Option<Result<DateTime<Utc>, String>> {
     Some(time.ok_or_else(|| format!("{input} is too far in the past")))
 }
 
-fn print_stats(stats: &erasecord_core::stats::Statistics, places: &[PackageTarget]) {
-    let day = |t: Option<chrono::DateTime<chrono::Utc>>| {
-        t.map(|t| {
-            t.with_timezone(&chrono::Local)
+fn bar(value: u64, max: u64, width: u64) -> String {
+    "#".repeat((value * width).div_ceil(max.max(1)) as usize)
+}
+
+fn print_overview(
+    o: &erasecord_core::insights::Overview,
+    places: &[erasecord_core::insights::Place],
+) {
+    let day = |t: Option<&erasecord_core::insights::MessageRef>| {
+        t.map(|m| {
+            m.sent_at
+                .with_timezone(&Local)
                 .format("%Y-%m-%d")
                 .to_string()
         })
         .unwrap_or_default()
     };
     println!(
-        "Messages      {} on {} days, {} to {}",
-        stats.messages,
-        stats.active_days,
-        day(stats.first_message),
-        day(stats.last_message)
+        "Messages      {} on {} of {} days, {} to {}",
+        o.messages,
+        o.active_days,
+        o.span_days,
+        day(o.first.as_ref()),
+        day(o.last.as_ref())
     );
+    println!("Places        {}", o.places);
     println!(
         "Words         {} ({} messages without text)",
-        stats.words, stats.without_text
+        o.words, o.without_text
     );
     println!(
         "Attachments   {} in {} messages",
-        stats.attachments, stats.with_attachments
+        o.attachments, o.with_attachments
     );
-    if let Some(busiest) = &stats.busiest_day {
+    println!("Links         {}", o.links);
+    if let Some(busiest) = &o.busiest_day {
         println!(
             "Busiest day   {} ({} messages)",
             busiest.date, busiest.messages
         );
     }
-    let hours: Vec<u64> = (0..24)
-        .map(|h| stats.week.iter().map(|d| d[h]).sum())
-        .collect();
-    if let Some((hour, _)) = hours.iter().enumerate().max_by_key(|(_, n)| **n) {
+    if let Some(streak) = &o.longest_streak {
         println!(
-            "Busiest hour  {hour:02}:00-{:02}:00 (local time)",
-            (hour + 1) % 24
+            "Longest streak {} days, {} to {}",
+            streak.days, streak.from, streak.to
         );
     }
-    let mut years: Vec<(&str, u64)> = Vec::new();
-    for month in &stats.months {
-        let year = &month.month[..4];
-        match years.last_mut() {
-            Some((y, n)) if *y == year => *n += month.messages,
-            _ => years.push((year, month.messages)),
-        }
+    if let Some(pause) = &o.longest_break {
+        println!(
+            "Longest break {} days, {} to {}",
+            pause.days, pause.from, pause.to
+        );
     }
-    if !years.is_empty() {
+    if !o.years.is_empty() {
         println!("\nPer year");
-        let max = years.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
-        for (year, n) in years {
-            let bar = "#".repeat(((n * 40).div_ceil(max)) as usize);
-            println!("  {year}  {n:>7}  {bar}");
+        let max = o.years.iter().map(|y| y.messages).max().unwrap_or(1);
+        for y in &o.years {
+            let top = y.top_place.map_or("", |p| places[p].name.as_str());
+            println!(
+                "  {}  {:>8}  {:<40}  most in {top}",
+                y.year,
+                y.messages,
+                bar(y.messages, max, 40)
+            );
         }
     }
-    let mut top: Vec<&PackageTarget> = places.iter().collect();
-    top.sort_by_key(|p| std::cmp::Reverse(p.messages));
-    if !top.is_empty() {
-        println!("\nWhere you write most");
-        for place in top.iter().take(10) {
-            println!("  {:>7}  {}", place.messages, place.target.name);
+}
+
+fn print_timeline(t: &erasecord_core::insights::Timeline) {
+    let hours: Vec<u64> = (0..24)
+        .map(|h| t.week_hours.iter().map(|d| d[h]).sum())
+        .collect();
+    let max = hours.iter().copied().max().unwrap_or(1);
+    println!("By hour (local time)");
+    for (hour, n) in hours.iter().enumerate() {
+        println!("  {hour:02}:00  {n:>8}  {}", bar(*n, max, 40));
+    }
+    let days: Vec<u64> = t.week_hours.iter().map(|d| d.iter().sum()).collect();
+    let max = days.iter().copied().max().unwrap_or(1);
+    println!("\nBy weekday");
+    for (name, n) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        .iter()
+        .zip(&days)
+    {
+        println!("  {name}    {n:>8}  {}", bar(*n, max, 40));
+    }
+    let max = t.months.iter().map(|m| m.total).max().unwrap_or(1);
+    println!("\nBy month");
+    for m in &t.months {
+        println!("  {}  {:>8}  {}", m.key, m.total, bar(m.total, max, 40));
+    }
+}
+
+fn print_places(
+    r: &erasecord_core::insights::PlacesReport,
+    places: &[erasecord_core::insights::Place],
+) {
+    for row in r.places.iter().take(30) {
+        println!("  {:>8}  {}", row.messages, places[row.place].name);
+    }
+    if r.places.len() > 30 {
+        println!("  … and {} more", r.places.len() - 30);
+    }
+    if !r.channels.is_empty() {
+        println!("\nChannels");
+        for c in r.channels.iter().take(20) {
+            println!(
+                "  {:>8}  #{} in {}",
+                c.messages, c.name, places[c.place].name
+            );
         }
-        if top.len() > 10 {
-            let rest: u64 = top[10..].iter().map(|p| p.messages).sum();
-            println!("  {rest:>7}  {} other places", top.len() - 10);
-        }
+    }
+}
+
+fn print_words(r: &erasecord_core::insights::WordsReport) {
+    println!("{} words, {} different", r.total_words, r.distinct_words);
+    for w in r.words.iter().take(30) {
+        println!("  {:>8}  {}", w.count, w.key);
+    }
+    if !r.emoji.is_empty() {
+        let emoji: Vec<String> = r
+            .emoji
+            .iter()
+            .take(15)
+            .map(|e| match e.id {
+                Some(_) => format!(":{}: {}", e.emoji, e.count),
+                None => format!("{} {}", e.emoji, e.count),
+            })
+            .collect();
+        println!("\nEmoji  {}", emoji.join("  "));
+    }
+}
+
+fn print_links(r: &erasecord_core::insights::LinksReport) {
+    println!("{} links in {} messages", r.links, r.messages_with_links);
+    for d in r.domains.iter().take(20) {
+        println!("  {:>8}  {}", d.count, d.key);
+    }
+    println!("\n{} attachments", r.attachments);
+    for k in r.kinds.iter().filter(|k| k.count > 0) {
+        println!("  {:>8}  {}", k.count, k.key);
     }
 }
 

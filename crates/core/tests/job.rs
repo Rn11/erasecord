@@ -597,6 +597,7 @@ fn package_of(messages: &[FakeMessage]) -> Package {
                 name: format!("channel {}", m.channel_id),
                 guild: m.guild_id.map(|g| (Snowflake(g), "Test server".to_owned())),
                 messages: vec![message],
+                recipients: Vec::new(),
             }),
         }
     }
