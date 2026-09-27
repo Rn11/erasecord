@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Messages are searched for only once.** Counting reads them and shows statistics while it goes (messages per
+  month, weekday × hour, words and emoji used most, files, links, busiest day, how long deleting takes). The dry
+  run and the clean-up use what it found and only check once for anything new. Kept in memory only.
+- **After a dry run:** *Delete these messages now* deletes exactly those; *Back to settings* keeps everything.
+- **Save before deleting:** export the messages to a file (CSV, JSON, JSON Lines) while deleting, set up with
+  the backup and encrypted with the same passphrase, or right after counting, before anything is deleted.
+  *Save list…* is now *Export deleted messages…*.
+- **Status line:** says what EraseCord is doing and counts down while Discord asks it to wait.
+- **Gentler pacing:** 2.5 s between deletions and 3 s between searches (was 1.2 s and 2 s), randomly varied, a
+  longer break every 100 deletions and slower after every rate limit.
+- Server, DM and channel lists are kept in memory for 15 minutes.
+- Release files: the command line tool is now `erasecord-cli-*`, and the release notes say which file to
+  download.
+- The language menu has a single-colour icon.
+
 ## 0.3.0
 
 - **Insights.** A new tab shows what is in your Discord data package, calculated on your computer and without

@@ -19,8 +19,10 @@ computer. Open source, for Windows, macOS and Linux, as a desktop app and as a c
   attachments, images, videos or audio, or everything except those (e.g. keep your photos).
 - **Everything, even what search misses:** import Discord's data package to delete by message ID, including
   closed DMs and messages the search does not find.
-- **Look before you delete:** a preview counts the matching messages per server/DM, and a dry run lists every
-  message that would be deleted.
+- **Look before you delete:** counting shows the matching messages per server/DM and, while it reads them,
+  statistics about them: when you wrote them, words and emoji you used most, files, links and how long deleting
+  will take. A dry run lists every message that would be deleted; **Delete these messages now** then deletes
+  exactly those. Messages are searched for only once: the dry run and the clean-up reuse what counting found.
 - **Keep pinned messages** if you like, or **overwrite** each message with random text before deleting it.
 - **Back up before deleting, encrypted:** the images and files of your messages and a list of the messages go
   into one encrypted archive before anything is deleted. A message whose files cannot be saved is kept. The
@@ -34,11 +36,16 @@ computer. Open source, for Windows, macOS and Linux, as a desktop app and as a c
   every day, messages per month or week by server, a weekday-by-hour heatmap, your busiest servers and DMs,
   a word cloud, emoji, the people you mention most, links, attachments and a search. Filter everything by time
   and place, and hand what you find straight to *Clean up*. Nothing is sent to Discord.
-- **Keep a record:** save the list of deleted messages (or, after a dry run, the ones that would be deleted)
-  with their text and attachment links as CSV or JSON, encrypted if you like.
+- **Keep a record:** export the messages with their text, date and attachment links as CSV, JSON or JSON Lines,
+  encrypted if you like: right after counting (before anything is deleted), automatically while deleting, or
+  afterwards.
 - **In your language:** English, German, Spanish, Swedish and Ukrainian. The app follows your system language,
   and you can pick another one at any time.
-- **Gentle with Discord:** strictly one request at a time, honours rate limits and retries temporary errors.
+- **Gentle with Discord:** strictly one request at a time, 2.5 s between deletions and 3 s between searches (each
+  varying randomly), a longer break every 100 deletions, and even slower after every rate limit. See
+  [How gentle is it?](#how-gentle-is-it)
+- **Always know what it is doing:** a status line says whether EraseCord is counting, reading, deleting, backing
+  up, taking a break or waiting for Discord, with a countdown.
 - **Your token stays with you:** it is only sent to discord.com. Optionally it is remembered in your system's
   credential store (Keychain, Windows Credential Manager, Secret Service).
 - **Updates itself:** the app offers new versions when they are out; updates are signed and only installed when
@@ -47,8 +54,9 @@ computer. Open source, for Windows, macOS and Linux, as a desktop app and as a c
 ## Install
 
 Download the installer for your system from the [releases page](https://github.com/Rn11/erasecord/releases):
-`-setup.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
-attached to every release as a single binary.
+`-setup.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The files named
+`erasecord-cli-*` are the command line tool only (up to 0.3.0: `erasecord-*`), a single program for the terminal
+without a window; most people do not need them.
 
 The builds are not code-signed yet:
 
@@ -86,14 +94,18 @@ Your token gives full access to your account: never share it. Changing your Disc
 2. Tick the servers and DMs to clean up and choose the time range. **Channels** next to a server lets you pick
    single channels; in the DM tab, **Find friends without an open DM** reaches closed conversations. Under
    *Content* you can narrow it down to words, links, attachments and so on.
-   Under *Options*, **Back up attachments before deleting** saves images, files and the list of messages into
-   one encrypted archive in a folder of your choice first (a dry run with this option only backs up). Keep the
-   passphrase: twelve generated words that you confirm by typing three of them, your own, or a file. Without it
-   the backup cannot be opened. **Open a backup…** decrypts and unpacks it again.
-3. Click **Count messages** to see how many of your messages match.
-4. Click **Delete** (or first **List them first (dry run)**) and watch the progress. You can pause or stop at any
-   point. When it is finished, **Save list…** saves every message of the run as CSV (opens in any spreadsheet
-   program) or JSON.
+   Under *Save before deleting*, **Back up attachments before deleting** saves images, files and the list of
+   messages into one encrypted archive in a folder of your choice first (a dry run with this option only backs
+   up), and **Export the messages to a file** writes every deleted message into a new file while deleting.
+   Both are encrypted with one passphrase: twelve generated words that you confirm by typing three of them,
+   your own, or a file. Keep it: without it the backup cannot be opened. **Open a backup…** decrypts and unpacks
+   it again.
+3. Click **Count messages**. EraseCord counts first, then reads the messages and shows statistics about them
+   as it goes; **Stop reading** keeps what was read. **Export these messages…** saves them to a file before
+   anything is deleted.
+4. Click **Delete** (or first **List them first (dry run)**, and then **Delete these messages now**) and watch
+   the progress; the status line says what is happening. You can pause or stop at any point. **Export deleted
+   messages…** saves every message of the run as CSV (opens in any spreadsheet program) or JSON.
 
 If a clean-up is stopped or the app is closed in the middle, the setup screen offers to **Continue** it later,
 with exactly the servers, DMs and conditions it had (and asks for the backup's passphrase, if it has one). The settings you used last are filled in automatically;
@@ -197,9 +209,32 @@ search index can lag behind. Words and content types go to the search as well, b
 again before it is deleted: author, time range, channel, words, regular expression and content type must all
 match, so a fuzzy search result is never deleted by mistake (it shows up as *skipped: excluded by filter*).
 
+Messages are only searched for once. Counting reads them page by page and keeps them in memory (never on disk;
+forgotten after 30 minutes, on logout and when the app closes). A dry run or clean-up afterwards takes them from
+there and only checks once whether anything new turned up. The lists of servers, DMs and channels are kept in
+memory for 15 minutes as well; the refresh button asks Discord again.
+
 With a data package there is no searching: EraseCord takes the message IDs from the package, checks each channel
 once (so a deleted channel or a server you left costs one request, not one per message) and deletes the
 matching messages directly.
+
+### How gentle is it?
+
+Discord allows about five deletions in five seconds. Tools that go near that limit, like
+[Undiscord](https://github.com/victornpb/undiscord) with its defaults of 1 s between deletions and 0.1 s
+between searches, get rate limited all the time, and its users [settle on 2 to 2.5
+s](https://github.com/victornpb/undiscord/discussions/414) to avoid that. EraseCord stays below it by default:
+
+- strictly one request at a time;
+- 2.5 s between deletions and 3 s between searches, each varying randomly by ±25 %;
+- a longer break (about 30 s) after every 100 deletions;
+- whenever Discord rate limits it, it waits as long as Discord asks and makes every later pause 25 % longer
+  (up to four times the setting) for the rest of the run;
+- messages are searched for once, not again for the dry run and the clean-up.
+
+That makes about 1,000 deletions an hour. The pauses can be changed under *Speed* (app) or with
+`--delete-delay` and `--search-delay` (CLI), but shorter ones make rate limits and attention from Discord more
+likely.
 
 Limitations:
 

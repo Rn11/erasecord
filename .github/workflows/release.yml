@@ -125,7 +125,7 @@ jobs:
           tagName: ${{ needs.version.outputs.tag }}
           releaseName: EraseCord ${{ needs.version.outputs.tag }}
           releaseBody: |
-            Installers for Windows, macOS and Linux, plus the command line tool.
+            Installers for Windows, macOS and Linux, plus the command line tool (erasecord-cli-*).
             The builds are not code-signed yet; see the README for how to open them.
           releaseDraft: true
           prerelease: false
@@ -140,16 +140,16 @@ jobs:
         include:
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            asset: erasecord-linux-x86_64
+            asset: erasecord-cli-linux-x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset: erasecord-windows-x86_64.exe
+            asset: erasecord-cli-windows-x86_64.exe
           - os: macos-latest
             target: aarch64-apple-darwin
-            asset: erasecord-macos-arm64
+            asset: erasecord-cli-macos-arm64
           - os: macos-latest
             target: x86_64-apple-darwin
-            asset: erasecord-macos-x86_64
+            asset: erasecord-cli-macos-x86_64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -195,9 +195,17 @@ jobs:
             echo "## What's new"
             cat notes.md
             echo
+            V="${TAG#v}"
             echo "## Downloads"
             echo
-            echo "Installers for Windows, macOS and Linux, plus the command line tool (\`erasecord-*\`)."
+            echo "| System | Download |"
+            echo "| --- | --- |"
+            echo "| Windows | \`EraseCord_${V}_x64-setup.exe\` |"
+            echo "| macOS (Intel and Apple Silicon) | \`EraseCord_${V}_universal.dmg\` |"
+            echo "| Linux | \`EraseCord_${V}_amd64.AppImage\`, \`.deb\` or \`.rpm\` |"
+            echo
+            echo "Files named \`erasecord-cli-*\` are the **command line tool only**, for use in a terminal; it has no window. Most people want the installer above."
+            echo
             echo "The builds are not code-signed yet; see the README for how to open them."
           } > body.md
           gh release edit "$TAG" --draft=false --latest --notes-file body.md
