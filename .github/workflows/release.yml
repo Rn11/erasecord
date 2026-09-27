@@ -1,17 +1,69 @@
 name: Release
 
-# Push a tag like v0.1.0 to build installers and CLI binaries into a draft
-# GitHub release. Review the draft, then publish it.
+# Releases itself: when main carries a version (app/src-tauri/tauri.conf.json)
+# that has no tag yet, it tags the commit, builds the installers and CLI
+# binaries into a draft and publishes it with that version's CHANGELOG.md
+# section. Pushing a tag like v0.2.0 by hand builds that tag the same way.
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the version and tag it
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(jq -r .version app/src-tauri/tauri.conf.json)
+          for other in \
+            "$(jq -r .version app/package.json)" \
+            "$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"; do
+            if [ "$other" != "$version" ]; then
+              echo "::error::Versions differ: tauri.conf.json has $version, another manifest has $other"
+              exit 1
+            fi
+          done
+          tag="v$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "$tag" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match version $version"
+              exit 1
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null)" = false ]; then
+            echo "$tag is released already; nothing to do."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+              git tag "$tag" "$GITHUB_SHA"
+              git push origin "$tag"
+            fi
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
   app:
     name: App (${{ matrix.platform }})
+    needs: version
+    if: needs.version.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +77,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -53,8 +107,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: app
-          tagName: ${{ github.ref_name }}
-          releaseName: EraseCord ${{ github.ref_name }}
+          tagName: ${{ needs.version.outputs.tag }}
+          releaseName: EraseCord ${{ needs.version.outputs.tag }}
           releaseBody: |
             Installers for Windows, macOS and Linux, plus the command line tool.
             The builds are not code-signed yet; see the README for how to open them.
@@ -64,7 +118,7 @@ jobs:
 
   cli:
     name: CLI (${{ matrix.target }})
-    needs: app
+    needs: [version, app]
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +138,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -102,4 +158,31 @@ jobs:
           binary=target/${{ matrix.target }}/release/erasecord
           [ -f "$binary.exe" ] && binary="$binary.exe"
           cp "$binary" "${{ matrix.asset }}"
-          gh release upload "${{ github.ref_name }}" "${{ matrix.asset }}" --clobber
+          gh release upload "${{ needs.version.outputs.tag }}" "${{ matrix.asset }}" --clobber
+
+  publish:
+    name: Publish
+    needs: [version, app, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Publish the release with its changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          # The section of CHANGELOG.md for this version, without its heading.
+          awk -v v="## ${TAG#v}" '$0 == v { on = 1; next } /^## / { on = 0 } on' CHANGELOG.md > notes.md
+          {
+            echo "## What's new"
+            cat notes.md
+            echo
+            echo "## Downloads"
+            echo
+            echo "Installers for Windows, macOS and Linux, plus the command line tool (\`erasecord-*\`)."
+            echo "The builds are not code-signed yet; see the README for how to open them."
+          } > body.md
+          gh release edit "$TAG" --draft=false --latest --notes-file body.md

@@ -21,7 +21,15 @@ want. Open source, for Windows, macOS and Linux, as a desktop app and as a comma
 - **Look before you delete:** a preview counts the matching messages per server/DM, and a dry run lists every
   message that would be deleted.
 - **Keep pinned messages** if you like, or **overwrite** each message with random text before deleting it.
-- **Pause, resume or stop** at any time; live progress with an activity log and time estimate.
+- **Back up before deleting:** save the images and files of your messages to a folder first, together with a
+  list of the messages. A message whose files cannot be saved is kept.
+- **Pause, resume or stop** at any time; live progress with an activity log and time estimate. A clean-up that
+  was stopped or cut short (crash, lost connection) **continues where it left off**, without searching or
+  counting anything twice.
+- **Presets:** the app remembers your last settings, and you can save settings together with the selected
+  servers and DMs under a name.
+- **Statistics:** see from your data package when and where you wrote how much: messages per month, a
+  weekday-by-hour heatmap and your busiest servers and DMs.
 - **Keep a record:** save the list of deleted messages (or, after a dry run, the ones that would be deleted)
   with their text and attachment links as CSV or JSON.
 - **In your language:** English, German, Spanish, Swedish and Ukrainian. The app follows your system language,
@@ -58,10 +66,16 @@ Your token gives full access to your account: never share it. Changing your Disc
 2. Tick the servers and DMs to clean up and choose the time range. **Channels** next to a server lets you pick
    single channels; in the DM tab, **Find friends without an open DM** reaches closed conversations. Under
    *Content* you can narrow it down to words, links, attachments and so on.
+   Under *Options*, **Back up attachments before deleting** saves images and files to a folder of your choice
+   first (a dry run with this option only backs up).
 3. Click **Count messages** to see how many of your messages match.
 4. Click **Delete** (or first **List them first (dry run)**) and watch the progress. You can pause or stop at any
    point. When it is finished, **Save list…** saves every message of the run as CSV (opens in any spreadsheet
    program) or JSON.
+
+If a clean-up is stopped or the app is closed in the middle, the setup screen offers to **Continue** it later,
+with exactly the servers, DMs and conditions it had. The settings you used last are filled in automatically;
+**Save as preset…** above the time range keeps the current settings and selection under a name.
 
 The language menu on the login screen and in the top bar switches the language; *System language* follows your
 computer's setting.
@@ -77,7 +91,8 @@ every message you ever sent:
    for an extracted one).
 3. The list now shows every server and DM from the package with the number of your messages, also closed DMs
    and servers you have left (marked *left*; Discord no longer lets you delete there). Continue as usual; counts
-   are exact and need no searching. **Back to live search** switches back.
+   are exact and need no searching. **Back to live search** switches back, and **Statistics** shows when and
+   where you wrote how much.
 
 The package stays on your computer and is only read, never uploaded. A package of another account is refused.
 Messages you deleted after requesting it are simply counted as deleted again. The package knows the people in a
@@ -95,6 +110,9 @@ erasecord delete -c 81384788765712390 --contains "party tonight" --without image
 erasecord list --friends                          # also friends whose DM is closed, for --dm-with
 erasecord delete --package package.zip --all-dms --has link --overwrite
 erasecord delete --all-servers --before 1y --dry-run --export old-messages.csv
+erasecord delete --all-dms --has file --backup ~/discord-backup --state run.json
+erasecord resume run.json                         # continue a clean-up that was stopped
+erasecord stats package.zip                       # statistics from your data package
 ```
 
 - Choose targets with `--target/-t <ID>` (repeatable), `--channel/-c <ID>` (narrows its server down to those
@@ -109,6 +127,12 @@ erasecord delete --all-servers --before 1y --dry-run --export old-messages.csv
 - `--export FILE` saves every deleted message (with `--dry-run`: every message that would be deleted) with its
   text and attachment links, as JSON for a `.json` file and CSV otherwise. The file is written while deleting,
   so it is complete even if you stop early.
+- `--backup DIR` downloads the attachments of each message into DIR (`attachments/<channel ID>/`) before
+  deleting it, and writes a list of the messages there (`messages-<date>.json`). A message whose files cannot
+  be downloaded is kept.
+- `--state FILE` records progress while deleting. If the run is stopped or cut short, `erasecord resume FILE`
+  continues it with the same targets and conditions; the file is removed when the run finishes.
+- `stats <PACKAGE>` prints statistics about your data package (`--json` for JSON); it needs no token.
 - Dates: `YYYY-MM-DD` (local midnight), an RFC 3339 timestamp, or an age like `30d`, `12w`, `6m`, `1y`.
   `--after` is inclusive, `--before` exclusive.
 - `delete` shows the preview and asks for confirmation unless you pass `--yes`.
@@ -173,6 +197,13 @@ cd app && npm run tauri build                # installers → target/release/bun
 
   The fake server holds a few hundred messages, answers every endpoint EraseCord uses (search, delete, edit,
   channels, pins, friends) and now and then replies with 429 so rate limiting can be watched. Release builds of the app ignore `ERASECORD_API_BASE`.
+
+### Releasing
+
+Raise the version in `Cargo.toml`, `app/package.json` (`npm version X.Y.Z --no-git-tag-version`) and
+`app/src-tauri/tauri.conf.json`, add a section for it to `CHANGELOG.md` and merge into `main`. The *Release*
+workflow sees the new version, tags the commit, builds everything and publishes the release with that
+changelog section.
 
 ## Project layout
 
