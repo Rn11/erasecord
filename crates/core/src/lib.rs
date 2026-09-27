@@ -5,12 +5,15 @@
 //! Everything here is independent of the user interface; the CLI and the
 //! desktop app are thin layers on top.
 
+pub mod anonymize;
 pub mod backup;
 pub mod client;
 pub mod delete;
 pub mod error;
 pub mod export;
 pub mod filter;
+pub mod insights;
+pub mod inspect;
 pub mod job;
 pub mod models;
 pub mod package;
@@ -18,8 +21,9 @@ mod ratelimit;
 pub mod resume;
 pub mod search;
 pub mod snowflake;
-pub mod stats;
+mod stopwords;
 pub mod targets;
+pub mod vault;
 
 pub use client::{Client, ClientConfig, Notice, NoticeSink};
 pub use delete::SkipReason;

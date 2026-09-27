@@ -1,7 +1,8 @@
 # EraseCord
 
 Delete your own Discord messages: from the servers and DMs you pick, in the time range you pick, whenever you
-want. Open source, for Windows, macOS and Linux, as a desktop app and as a command line tool.
+want. And see what you wrote: heatmaps, charts and word clouds from your Discord data package, calculated on your
+computer. Open source, for Windows, macOS and Linux, as a desktop app and as a command line tool.
 
 > [!WARNING]
 > EraseCord logs in with your **user token**. Automating a user account is against
@@ -21,27 +22,32 @@ want. Open source, for Windows, macOS and Linux, as a desktop app and as a comma
 - **Look before you delete:** a preview counts the matching messages per server/DM, and a dry run lists every
   message that would be deleted.
 - **Keep pinned messages** if you like, or **overwrite** each message with random text before deleting it.
-- **Back up before deleting:** save the images and files of your messages to a folder first, together with a
-  list of the messages. A message whose files cannot be saved is kept.
+- **Back up before deleting, encrypted:** the images and files of your messages and a list of the messages go
+  into one encrypted archive before anything is deleted. A message whose files cannot be saved is kept. The
+  archive is protected by a passphrase: twelve generated words, your own, or a passphrase file.
 - **Pause, resume or stop** at any time; live progress with an activity log and time estimate. A clean-up that
   was stopped or cut short (crash, lost connection) **continues where it left off**, without searching or
   counting anything twice.
 - **Presets:** the app remembers your last settings, and you can save settings together with the selected
   servers and DMs under a name.
-- **Statistics:** see from your data package when and where you wrote how much: messages per month, a
-  weekday-by-hour heatmap and your busiest servers and DMs.
+- **Insights into your own messages**, from your data package and without logging in: a calendar heatmap of
+  every day, messages per month or week by server, a weekday-by-hour heatmap, your busiest servers and DMs,
+  a word cloud, emoji, the people you mention most, links, attachments and a search. Filter everything by time
+  and place, and hand what you find straight to *Clean up*. Nothing is sent to Discord.
 - **Keep a record:** save the list of deleted messages (or, after a dry run, the ones that would be deleted)
-  with their text and attachment links as CSV or JSON.
+  with their text and attachment links as CSV or JSON, encrypted if you like.
 - **In your language:** English, German, Spanish, Swedish and Ukrainian. The app follows your system language,
   and you can pick another one at any time.
 - **Gentle with Discord:** strictly one request at a time, honours rate limits and retries temporary errors.
 - **Your token stays with you:** it is only sent to discord.com. Optionally it is remembered in your system's
   credential store (Keychain, Windows Credential Manager, Secret Service).
+- **Updates itself:** the app offers new versions when they are out; updates are signed and only installed when
+  you click.
 
 ## Install
 
 Download the installer for your system from the [releases page](https://github.com/Rn11/erasecord/releases):
-`.msi`/`.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
+`-setup.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
 attached to every release as a single binary.
 
 The builds are not code-signed yet:
@@ -49,6 +55,20 @@ The builds are not code-signed yet:
 - **macOS:** right-click the app and choose *Open*, or run `xattr -d com.apple.quarantine /Applications/EraseCord.app`.
 - **Windows:** in the SmartScreen dialog choose *More info → Run anyway*.
 - **Linux (AppImage):** `chmod +x EraseCord_*.AppImage` and run it.
+
+From 0.3.0 on, the app looks for a newer version a few seconds after it starts (one request to github.com) and
+offers it; it is only downloaded and installed when you click *Update and restart*, and only if it is signed with
+EraseCord's key.
+
+### Uninstall
+
+- **Windows:** *Settings → Apps → Installed apps*, search for *EraseCord*, then *⋯ → Uninstall*. The installer puts
+  the app in `%LOCALAPPDATA%\EraseCord`, so running `%LOCALAPPDATA%\EraseCord\uninstall.exe` works too. Version
+  0.2.0 also came as an `.msi`; if you installed that one, it is listed as well, or run
+  `msiexec /x EraseCord_0.2.0_x64_en-US.msi` in the folder you downloaded it to. The uninstaller offers to delete
+  your settings too; a remembered token is removed when you log out.
+- **macOS:** move *EraseCord* from *Applications* to the Bin.
+- **Linux:** `sudo apt remove erase-cord` or `sudo dnf remove erase-cord`, or delete the AppImage.
 
 ## Finding your token
 
@@ -66,15 +86,17 @@ Your token gives full access to your account: never share it. Changing your Disc
 2. Tick the servers and DMs to clean up and choose the time range. **Channels** next to a server lets you pick
    single channels; in the DM tab, **Find friends without an open DM** reaches closed conversations. Under
    *Content* you can narrow it down to words, links, attachments and so on.
-   Under *Options*, **Back up attachments before deleting** saves images and files to a folder of your choice
-   first (a dry run with this option only backs up).
+   Under *Options*, **Back up attachments before deleting** saves images, files and the list of messages into
+   one encrypted archive in a folder of your choice first (a dry run with this option only backs up). Keep the
+   passphrase: twelve generated words that you confirm by typing three of them, your own, or a file. Without it
+   the backup cannot be opened. **Open a backup…** decrypts and unpacks it again.
 3. Click **Count messages** to see how many of your messages match.
 4. Click **Delete** (or first **List them first (dry run)**) and watch the progress. You can pause or stop at any
    point. When it is finished, **Save list…** saves every message of the run as CSV (opens in any spreadsheet
    program) or JSON.
 
 If a clean-up is stopped or the app is closed in the middle, the setup screen offers to **Continue** it later,
-with exactly the servers, DMs and conditions it had. The settings you used last are filled in automatically;
+with exactly the servers, DMs and conditions it had (and asks for the backup's passphrase, if it has one). The settings you used last are filled in automatically;
 **Save as preset…** above the time range keeps the current settings and selection under a name.
 
 The language menu on the login screen and in the top bar switches the language; *System language* follows your
@@ -85,14 +107,24 @@ computer's setting.
 Discord's search only finds what it has indexed, and only in places you can still see. Your data package lists
 every message you ever sent:
 
-1. In Discord, open *User Settings → Data & Privacy → Request all of my data* and wait for the e-mail (this can
-   take up to 30 days). Only *Messages* is needed.
+1. In Discord, open *User Settings → Data & Privacy* and request your data (*Request all of my data* in the
+   phone app). *Messages* is needed; *Servers* and *Account* are recommended. It can take up to 30 days; the
+   download link in the e-mail then works for 30 days. The app shows these steps under *How do I get my data
+   package?*.
 2. In EraseCord, click **Import data package…** above the server list and pick the `.zip` file (or **(folder)**
-   for an extracted one).
+   for an extracted one), or simply drop it onto the window. Next time, **Open the last package** opens it again.
 3. The list now shows every server and DM from the package with the number of your messages, also closed DMs
    and servers you have left (marked *left*; Discord no longer lets you delete there). Continue as usual; counts
-   are exact and need no searching. **Back to live search** switches back, and **Statistics** shows when and
-   where you wrote how much.
+   are exact and need no searching. **Back to live search** switches back.
+
+### Insights
+
+The **Insights** tab shows what is in your data package: an overview with streaks and your first message, time
+charts, your servers and DMs, words and emoji, links and files, and a search. It works without logging in (*Open
+Insights without logging in* on the login screen), and a package imported in *Clean up* is already there. The
+filters at the top (period, servers and DMs) apply to everything; clicking a year, month, day, server or word
+narrows it down. **Clean up…** next to a server or search result opens *Clean up* with it filled in, to be
+counted and checked before anything is deleted. One million messages open in about a second.
 
 The package stays on your computer and is only read, never uploaded. A package of another account is refused.
 Messages you deleted after requesting it are simply counted as deleted again. The package knows the people in a
@@ -112,7 +144,10 @@ erasecord delete --package package.zip --all-dms --has link --overwrite
 erasecord delete --all-servers --before 1y --dry-run --export old-messages.csv
 erasecord delete --all-dms --has file --backup ~/discord-backup --state run.json
 erasecord resume run.json                         # continue a clean-up that was stopped
-erasecord stats package.zip                       # statistics from your data package
+erasecord open-backup ~/discord-backup/erasecord-backup-*.tar.age --to ~/restored
+erasecord stats package.zip --section words --from 2024-01-01 --to 2024-12-31
+erasecord search package.zip party tonight        # your messages with both words
+erasecord inspect-package package.zip             # its structure only, safe to share
 ```
 
 - Choose targets with `--target/-t <ID>` (repeatable), `--channel/-c <ID>` (narrows its server down to those
@@ -125,14 +160,24 @@ erasecord stats package.zip                       # statistics from your data pa
 - `--package <PATH>` takes the messages from your data package (`.zip` or extracted folder) instead of
   searching; `list --package` and `preview --package` work without a token.
 - `--export FILE` saves every deleted message (with `--dry-run`: every message that would be deleted) with its
-  text and attachment links, as JSON for a `.json` file and CSV otherwise. The file is written while deleting,
-  so it is complete even if you stop early.
-- `--backup DIR` downloads the attachments of each message into DIR (`attachments/<channel ID>/`) before
-  deleting it, and writes a list of the messages there (`messages-<date>.json`). A message whose files cannot
-  be downloaded is kept.
+  text and attachment links, as JSON for a `.json` file, JSON Lines for `.jsonl` and CSV otherwise, encrypted as
+  `FILE.age`. The file is written while deleting, so it is complete even if you stop early.
+- `--backup DIR` saves the attachments of each message before deleting it, into one encrypted archive
+  `DIR/erasecord-backup-<time>.tar.age` with the list of messages. A message whose files cannot be downloaded is
+  kept. While the run is going the backup is written as encrypted parts (`….parts/`); a message is deleted only
+  once the part with its files is safely on disk, and the parts are combined at the end.
+- Backups and exports are encrypted unless you pass `--no-encrypt`. The passphrase is asked for (press Enter for
+  twelve generated words, confirmed by typing three of them) or read from the first line of
+  `--passphrase-file FILE`. `open-backup PATH --to DIR` decrypts an archive, a `.parts` folder or an export;
+  the archives also open with [age](https://age-encryption.org) (`age -d FILE | tar x`).
 - `--state FILE` records progress while deleting. If the run is stopped or cut short, `erasecord resume FILE`
   continues it with the same targets and conditions; the file is removed when the run finishes.
-- `stats <PACKAGE>` prints statistics about your data package (`--json` for JSON); it needs no token.
+- `stats <PACKAGE>` prints statistics about your data package: `--section` `overview` (default), `time`,
+  `places`, `words`, `links` or `info`; `--from`/`--to` (days, inclusive) and `--place <ID>` narrow it down;
+  `--json` for JSON. `search <PACKAGE> <WORDS>…` lists your messages with all the words. Both need no token.
+- `inspect-package <PACKAGE>` prints only the structure of a package (file and field names, counts, kinds of
+  values; no messages, names, IDs or dates) and `anonymize-package <PACKAGE> <OUT.zip>` writes a copy with every
+  value replaced, for bug reports and testing.
 - Dates: `YYYY-MM-DD` (local midnight), an RFC 3339 timestamp, or an age like `30d`, `12w`, `6m`, `1y`.
   `--after` is inclusive, `--before` exclusive.
 - `delete` shows the preview and asks for confirmation unless you pass `--yes`.
@@ -197,13 +242,18 @@ cd app && npm run tauri build                # installers → target/release/bun
 
   The fake server holds a few hundred messages, answers every endpoint EraseCord uses (search, delete, edit,
   channels, pins, friends) and now and then replies with 429 so rate limiting can be watched. Release builds of the app ignore `ERASECORD_API_BASE`.
+- **Insights in the browser with real numbers:** `python3 tools/big_package.py big.zip --messages 100000`
+  writes a large made-up package; `python3 tools/fake_discord.py --insights-package big.zip` then answers the
+  mock backend's Insights queries by running the CLI (`cargo build -p erasecord` first).
 
 ### Releasing
 
 Raise the version in `Cargo.toml`, `app/package.json` (`npm version X.Y.Z --no-git-tag-version`) and
 `app/src-tauri/tauri.conf.json`, add a section for it to `CHANGELOG.md` and merge into `main`. The *Release*
 workflow sees the new version, tags the commit, builds everything and publishes the release with that
-changelog section.
+changelog section. Updates are signed with the key in the repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (made with `npx tauri signer generate`; its public half is in
+`tauri.conf.json`). Without them, releases are built without update files.
 
 ## Project layout
 
@@ -212,13 +262,15 @@ crates/core/      Discord client, rate limiting, search, deletion job (all logic
 crates/cli/       the `erasecord` command line tool
 app/src-tauri/    desktop app backend: Tauri commands around the core
 app/src/          desktop app UI (SvelteKit + TypeScript)
-tools/            fake Discord API for development
+tools/            fake Discord API and a large made-up data package, for development
 ```
 
 ## Roadmap
 
 - Logging in with your Discord account instead of a token.
 - Code-signed builds for macOS and Windows.
+- Insights from the *Activity* part of the data package (time online, devices, voice), once its format can be
+  checked against a real package: `erasecord inspect-package` output is welcome.
 
 ## License
 

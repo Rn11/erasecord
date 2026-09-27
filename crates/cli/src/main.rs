@@ -9,7 +9,9 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
+use erasecord_core::insights::Index;
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
+use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot, SecretString};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
     ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target, TargetKind,
@@ -73,15 +75,73 @@ enum Command {
         #[command(flatten)]
         options: DeleteOptions,
     },
-    /// Statistics about the messages in your Discord data package: when and where you
-    /// wrote. Needs no token.
+    /// Statistics about the messages in your Discord data package: when, where and
+    /// what you wrote. Needs no token; nothing is sent anywhere.
     Stats {
         /// The data package (.zip or extracted folder).
         #[arg(value_name = "PATH")]
         package: PathBuf,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// What to show.
+        #[arg(long, value_enum, default_value = "overview")]
+        section: Section,
         /// Print JSON instead of a summary.
         #[arg(long)]
         json: bool,
+    },
+    /// Find your messages in the data package that contain all of these words, in
+    /// any case (the same rule as `delete --contains`). Needs no token.
+    Search {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// The words to look for.
+        #[arg(value_name = "WORDS", required = true)]
+        words: Vec<String>,
+        #[command(flatten)]
+        scope: ScopeArgs,
+        /// Show at most this many messages, newest first.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Print JSON instead of a list.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Describe the structure of a data package without any of its content: file and
+    /// field names, counts and kinds of values, but no messages, names, IDs or dates.
+    /// Safe to share, e.g. to help support a new package format. Needs no token.
+    InspectPackage {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a copy of a data package with every value replaced: random words for
+    /// text, placeholders for names, new IDs and links, dates moved back by a random
+    /// number of weeks. For testing with realistic data. Needs no token.
+    AnonymizePackage {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// The new .zip file to write.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+    },
+    /// Decrypt and unpack an encrypted backup (erasecord-backup-….tar.age, or a
+    /// ….parts folder of a backup that was not finished) or an encrypted export.
+    OpenBackup {
+        /// The .tar.age archive, .parts folder or encrypted export.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// The folder to unpack into.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Read the passphrase from the first line of FILE instead of asking.
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
     },
     /// Continue a clean-up that was started with `delete --state FILE` and did not
     /// finish, with exactly the servers, DMs and conditions it had.
@@ -89,10 +149,54 @@ enum Command {
         /// The state file given to `delete --state`.
         #[arg(value_name = "FILE")]
         file: PathBuf,
+        /// Read the passphrase of the encrypted backup from the first line of FILE.
+        #[arg(long, value_name = "PASSFILE")]
+        passphrase_file: Option<PathBuf>,
         /// Print every deleted or skipped message.
         #[arg(short, long)]
         verbose: bool,
     },
+}
+
+#[derive(Args, Clone)]
+struct ScopeArgs {
+    /// Only from this day on (YYYY-MM-DD, local time).
+    #[arg(long, value_name = "DATE")]
+    from: Option<NaiveDate>,
+    /// Only up to and including this day.
+    #[arg(long, value_name = "DATE")]
+    to: Option<NaiveDate>,
+    /// Only this server or DM (ID from `erasecord list --package`); repeat for several.
+    #[arg(long = "place", value_name = "ID")]
+    places: Vec<u64>,
+    /// Only this channel of a server; repeat for several.
+    #[arg(long = "channel", value_name = "ID")]
+    channels: Vec<u64>,
+}
+
+impl ScopeArgs {
+    fn scope(&self) -> erasecord_core::insights::Scope {
+        erasecord_core::insights::Scope {
+            from: self.from,
+            to: self.to,
+            places: self.places.iter().copied().map(Snowflake).collect(),
+            channels: self.channels.iter().copied().map(Snowflake).collect(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Section {
+    /// The servers and DMs, time range and totals.
+    Info,
+    Overview,
+    /// Per month, week, weekday and hour.
+    Time,
+    Places,
+    /// Words, emoji, mentions and message lengths.
+    Words,
+    /// Links and attachments.
+    Links,
 }
 
 #[derive(Args)]
@@ -171,13 +275,23 @@ struct DeleteOptions {
     verbose: bool,
     /// Save every deleted message (or, with --dry-run, every message that would be deleted),
     /// with its text and attachment links, to FILE: JSON for a .json file, CSV otherwise.
+    /// Encrypted (FILE.age) unless --no-encrypt.
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
-    /// Before deleting a message, save its attachments into DIR (a message whose files
-    /// cannot be saved is kept), together with messages-<time>.json listing all messages.
-    /// With --dry-run this only backs up.
+    /// Before deleting a message, save its attachments (a message whose files cannot be saved
+    /// is kept) and the list of messages into one encrypted archive in DIR,
+    /// erasecord-backup-<time>.tar.age; see `erasecord open-backup`. With --no-encrypt,
+    /// plain files and messages-<time>.json instead. With --dry-run this only backs up.
     #[arg(long, value_name = "DIR")]
     backup: Option<PathBuf>,
+    /// Write the backup and --export without encryption. Not recommended: they contain
+    /// your messages.
+    #[arg(long)]
+    no_encrypt: bool,
+    /// Read the passphrase that encrypts the backup and --export from the first line of FILE,
+    /// instead of asking for it.
+    #[arg(long, value_name = "FILE")]
+    passphrase_file: Option<PathBuf>,
     /// Keep track of the progress in FILE, so that a run that is stopped or cut short can be
     /// continued with `erasecord resume FILE`. The file is removed once everything is done.
     #[arg(long, value_name = "FILE")]
@@ -216,8 +330,12 @@ impl Command {
             Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
                 selection.package.as_deref()
             }
-            Command::Stats { package, .. } => Some(package),
-            Command::Channels { .. } | Command::Resume { .. } => None,
+            Command::Stats { package, .. } | Command::Search { package, .. } => Some(package),
+            Command::Channels { .. }
+            | Command::Resume { .. }
+            | Command::InspectPackage { .. }
+            | Command::OpenBackup { .. }
+            | Command::AnonymizePackage { .. } => None,
         }
     }
 
@@ -227,7 +345,11 @@ impl Command {
             Command::List { .. }
             | Command::Channels { .. }
             | Command::Resume { .. }
-            | Command::Stats { .. } => return Ok(()),
+            | Command::Stats { .. }
+            | Command::Search { .. }
+            | Command::InspectPackage { .. }
+            | Command::OpenBackup { .. }
+            | Command::AnonymizePackage { .. } => return Ok(()),
             Command::Preview {
                 selection,
                 range,
@@ -279,6 +401,59 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
+    match &cli.command {
+        Command::InspectPackage { package, json } => {
+            eprintln!("Reading {}…", package.display());
+            let report = erasecord_core::inspect::inspect(package)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.to_text());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::OpenBackup {
+            path,
+            to,
+            passphrase_file,
+        } => {
+            let passphrase = ask_passphrase(passphrase_file.as_deref(), false)?;
+            eprintln!("Decrypting {}…", path.display());
+            let opened = vault::open(path, &passphrase, to).map_err(anyhow::Error::msg)?;
+            println!(
+                "Unpacked {} file(s) and {} message(s) into {}.",
+                opened.files,
+                opened.messages,
+                opened.folder.display()
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::AnonymizePackage { package, output } => {
+            eprintln!("Reading {}…", package.display());
+            let summary = erasecord_core::anonymize::anonymize(package, output)?;
+            println!(
+                "Wrote an anonymized copy to {}: {} files with {} records.",
+                output.display(),
+                summary.files,
+                summary.records
+            );
+            println!(
+                "Every text, name, ID, link and number was replaced, and dates were moved back \
+                 by a random number of weeks (not recorded anywhere)."
+            );
+            if !summary.omitted.is_empty() {
+                let omitted: Vec<String> = summary
+                    .omitted
+                    .iter()
+                    .map(|(kind, count)| format!("{count} {kind}"))
+                    .collect();
+                println!("Left out: {}.", omitted.join(", "));
+            }
+            println!("Please look through the copy before you share it.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
+    }
     cli.command.check()?;
     let package = match cli.command.package_path() {
         Some(path) => Some(Arc::new(load_package(path)?)),
@@ -288,7 +463,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let offline = package.is_some()
         && matches!(
             cli.command,
-            Command::List { .. } | Command::Preview { .. } | Command::Stats { .. }
+            Command::List { .. }
+                | Command::Preview { .. }
+                | Command::Stats { .. }
+                | Command::Search { .. }
         );
     let session = if offline {
         None
@@ -310,14 +488,62 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
-        Command::Stats { json, .. } => {
-            let package = package.expect("package loaded");
-            let offset = chrono::Local::now().offset().local_minus_utc() / 60;
-            let stats = erasecord_core::stats::Statistics::of(&package, offset);
+        Command::InspectPackage { .. }
+        | Command::AnonymizePackage { .. }
+        | Command::OpenBackup { .. } => {
+            unreachable!("handled before logging in")
+        }
+        Command::Stats {
+            scope,
+            section,
+            json,
+            ..
+        } => {
+            let index = Index::build(package.expect("package loaded"), &Local);
+            let scope = scope.scope();
+            let places = index.info().places;
+            let print = |value: serde_json::Value| -> Result<()> {
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                Ok(())
+            };
+            match section {
+                Section::Info => print(serde_json::to_value(index.info())?)?,
+                Section::Overview if json => print(serde_json::to_value(index.overview(&scope))?)?,
+                Section::Overview => print_overview(&index.overview(&scope), &places),
+                Section::Time if json => print(serde_json::to_value(index.timeline(&scope))?)?,
+                Section::Time => print_timeline(&index.timeline(&scope)),
+                Section::Places if json => print(serde_json::to_value(index.places(&scope))?)?,
+                Section::Places => print_places(&index.places(&scope), &places),
+                Section::Words if json => print(serde_json::to_value(index.words(&scope))?)?,
+                Section::Words => print_words(&index.words(&scope)),
+                Section::Links if json => print(serde_json::to_value(index.links(&scope))?)?,
+                Section::Links => print_links(&index.links(&scope)),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Search {
+            words,
+            scope,
+            limit,
+            json,
+            ..
+        } => {
+            let index = Index::build(package.expect("package loaded"), &Local);
+            let found = index.search(&scope.scope(), &words.join(" "), limit);
             if json {
-                println!("{}", serde_json::to_string_pretty(&stats)?);
-            } else {
-                print_stats(&stats, &package.targets());
+                println!("{}", serde_json::to_string_pretty(&found)?);
+                return Ok(ExitCode::SUCCESS);
+            }
+            let places = index.info().places;
+            println!("{} messages found", found.total);
+            for m in &found.messages {
+                println!(
+                    "\n{}  {} · {}\n  {}",
+                    m.sent_at.with_timezone(&Local).format("%Y-%m-%d %H:%M"),
+                    places[m.place].name,
+                    m.channel,
+                    m.text.replace('\n', "\n  ")
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -416,7 +642,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 None => select(&client, &selection).await?,
             };
             let filter = build_filter(&range, &content, options.skip_pinned)?;
-            let job_options = JobOptions {
+            let encrypt =
+                !options.no_encrypt && (options.backup.is_some() || options.export.is_some());
+            let mut job_options = JobOptions {
                 delete_delay_ms: options.delete_delay,
                 search_delay_ms: options.search_delay,
                 dry_run: options.dry_run,
@@ -437,6 +665,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     println!("Nothing was deleted.");
                     return Ok(ExitCode::SUCCESS);
                 }
+            }
+            let passphrase = if encrypt {
+                Some(ask_passphrase(options.passphrase_file.as_deref(), true)?)
+            } else {
+                None
+            };
+            if let (Some(dir), Some(passphrase)) = (&options.backup, &passphrase) {
+                let (settings, keys) = EncryptedBackupSettings::create(dir, passphrase.clone())
+                    .with_context(|| format!("cannot create the backup in {}", dir.display()))?;
+                eprintln!(
+                    "The backup is encrypted and becomes {} at the end.",
+                    settings.archive.display()
+                );
+                job_options.backup_encryption = Some(settings);
+                job_options.backup_keys = KeySlot(Some(Arc::new(keys)));
             }
             let state = match &options.state {
                 Some(file) => {
@@ -462,14 +705,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 control,
                 verbose: options.verbose,
                 export: options.export,
+                export_passphrase: passphrase,
                 state,
             })
             .await
         }
-        Command::Resume { file, verbose } => {
+        Command::Resume {
+            file,
+            verbose,
+            passphrase_file,
+        } => {
             let (client, me) = online();
             let saved = SavedRun::load(&file)
                 .with_context(|| format!("cannot read the state file {}", file.display()))?;
+            let mut options = saved.resume_options();
+            if let Some(settings) = &saved.options.backup_encryption {
+                eprintln!("The backup of this clean-up is encrypted.");
+                let passphrase = ask_passphrase(passphrase_file.as_deref(), false)?;
+                let keys = settings.unlock(passphrase).map_err(anyhow::Error::msg)?;
+                options.backup_keys = KeySlot(Some(Arc::new(keys)));
+            }
             let package = match &saved.package {
                 Some(path) => {
                     let package = load_package(path)?;
@@ -493,10 +748,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 package,
                 targets: saved.targets.clone(),
                 filter: saved.filter.clone(),
-                options: saved.resume_options(),
+                options,
                 control,
                 verbose,
                 export: None,
+                export_passphrase: None,
                 state: Some((file, saved)),
             })
             .await
@@ -516,6 +772,116 @@ fn load_package(path: &Path) -> Result<Package> {
         eprintln!("warning: the package has no account/user.json, so it cannot be checked that it is yours");
     }
     Ok(package)
+}
+
+/// A CSV or JSON record of the run, encrypted if a passphrase is given.
+enum Exporter {
+    Plain(PathBuf, ExportWriter<io::BufWriter<std::fs::File>>),
+    Encrypted(
+        PathBuf,
+        ExportWriter<vault::StreamWriter<io::BufWriter<std::fs::File>>>,
+    ),
+}
+
+impl Exporter {
+    fn create(path: &Path, passphrase: Option<&SecretString>) -> Result<Self> {
+        let format = ExportFormat::for_path(path);
+        Ok(match passphrase {
+            None => {
+                let file = std::fs::File::create(path)
+                    .with_context(|| format!("cannot create {}", path.display()))?;
+                Exporter::Plain(
+                    path.to_owned(),
+                    ExportWriter::new(io::BufWriter::new(file), format)?,
+                )
+            }
+            Some(passphrase) => {
+                let mut name = path.as_os_str().to_owned();
+                if path.extension().is_none_or(|e| e != "age") {
+                    name.push(".age");
+                }
+                let path = PathBuf::from(name);
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("cannot create {}", path.display()))?;
+                let sealer = vault::encrypt(passphrase, io::BufWriter::new(file))?;
+                Exporter::Encrypted(path, ExportWriter::new(sealer, format)?)
+            }
+        })
+    }
+
+    fn observe(&mut self, event: &Event) -> Result<()> {
+        let (path, result) = match self {
+            Exporter::Plain(path, w) => (path, w.observe(event)),
+            Exporter::Encrypted(path, w) => (path, w.observe(event)),
+        };
+        result.with_context(|| format!("could not write {}", path.display()))
+    }
+
+    fn finish(self) -> Result<()> {
+        let (path, rows, result) = match self {
+            Exporter::Plain(path, w) => {
+                let rows = w.rows();
+                (path, rows, w.finish().map(drop))
+            }
+            Exporter::Encrypted(path, w) => {
+                let rows = w.rows();
+                let result = w.finish().and_then(|sealer| sealer.finish()).map(drop);
+                (path, rows, result)
+            }
+        };
+        result.with_context(|| format!("could not write {}", path.display()))?;
+        println!("Saved {rows} message(s) to {}.", path.display());
+        Ok(())
+    }
+}
+
+/// The passphrase from `file`, or asked for. A new one may be left empty
+/// to get a generated one, which must then be confirmed.
+fn ask_passphrase(file: Option<&Path>, new: bool) -> Result<SecretString> {
+    if let Some(file) = file {
+        return vault::read_passphrase_file(file)
+            .with_context(|| format!("cannot read the passphrase from {}", file.display()));
+    }
+    if !io::stdin().is_terminal() {
+        bail!("an encrypted backup or export needs a passphrase: pass --passphrase-file FILE, or --no-encrypt");
+    }
+    if !new {
+        return Ok(vault::secret(&rpassword::prompt_password(
+            "Passphrase (input hidden): ",
+        )?));
+    }
+    let typed = rpassword::prompt_password(
+        "Passphrase for the encrypted backup and export (input hidden; press Enter to get one): ",
+    )?;
+    if !typed.is_empty() {
+        let again = rpassword::prompt_password("The same passphrase again: ")?;
+        if again != typed {
+            bail!("the passphrases differ");
+        }
+        if typed.chars().count() < 12 {
+            eprintln!("warning: a passphrase this short can be guessed; a sentence or several words are safer");
+        }
+        return Ok(vault::secret(&typed));
+    }
+    let generated = vault::generate_passphrase();
+    let words: Vec<&str> = generated.split(' ').collect();
+    println!("\nYour passphrase (write it down; without it the backup cannot be opened):\n");
+    println!("    {generated}\n");
+    for position in [3, 7, 11] {
+        loop {
+            print!("Type word {position} to confirm: ");
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 {
+                bail!("not confirmed");
+            }
+            if answer.trim().eq_ignore_ascii_case(words[position - 1]) {
+                break;
+            }
+            println!("That is not word {position}.");
+        }
+    }
+    Ok(vault::secret(&generated))
 }
 
 fn read_token() -> Result<String> {
@@ -755,6 +1121,8 @@ struct Plan {
     control: JobControl,
     verbose: bool,
     export: Option<PathBuf>,
+    /// Encrypts the export, if set.
+    export_passphrase: Option<SecretString>,
     /// Where to keep track of the progress, and what is known so far.
     state: Option<(PathBuf, SavedRun)>,
 }
@@ -773,6 +1141,7 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
         control,
         verbose,
         export,
+        export_passphrase,
         mut state,
     } = plan;
     let export = export.as_deref();
@@ -782,7 +1151,12 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
             .with_context(|| format!("cannot write the state file {}", file.display()))?;
     }
     // Created before anything is deleted, so a bad path costs nothing.
-    let backup_list = match &options.backup_dir {
+    // An encrypted backup keeps its own list, inside the archive.
+    let plain_backup = options
+        .backup_dir
+        .as_ref()
+        .filter(|_| options.backup_encryption.is_none());
+    let backup_list = match plain_backup {
         Some(dir) => {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -792,11 +1166,11 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
         None => None,
     };
     let mut exporters = Vec::new();
-    for path in export.into_iter().chain(backup_list.as_deref()) {
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("cannot create {}", path.display()))?;
-        let writer = ExportWriter::new(io::BufWriter::new(file), ExportFormat::for_path(path))?;
-        exporters.push((path.to_owned(), writer));
+    if let Some(path) = export {
+        exporters.push(Exporter::create(path, export_passphrase.as_ref())?);
+    }
+    if let Some(path) = &backup_list {
+        exporters.push(Exporter::create(path, None)?);
     }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let dry_run = options.dry_run;
@@ -827,19 +1201,13 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
                     .with_context(|| format!("cannot write the state file {}", file.display()))?;
             }
         }
-        for (path, exporter) in &mut exporters {
-            exporter
-                .observe(&event)
-                .with_context(|| format!("could not write {}", path.display()))?;
+        for exporter in &mut exporters {
+            exporter.observe(&event)?;
         }
     }
     let summary = task.await?;
-    for (path, exporter) in exporters {
-        let rows = exporter.rows();
-        exporter
-            .finish()
-            .with_context(|| format!("could not write {}", path.display()))?;
-        println!("Saved {rows} message(s) to {}.", path.display());
+    for exporter in exporters {
+        exporter.finish()?;
     }
 
     println!(
@@ -947,6 +1315,19 @@ impl Progress {
                 stats.deleted, self.deleted_label, stats.skipped, stats.failed
             )),
             Event::Notice { notice } => self.line(format!("  {}", describe_notice(notice))),
+            Event::BackupSealed {
+                archive,
+                files,
+                messages,
+            } => self.line(format!(
+                "Backup: {} file(s) and {messages} message(s) in {} (encrypted).",
+                files,
+                archive.display()
+            )),
+            Event::BackupKept { folder, reason } => self.line(format!(
+                "The backup stays in {} for now: {reason}.",
+                folder.display()
+            )),
             Event::Finished(_) => {
                 self.clear_status();
                 return;
@@ -1052,72 +1433,147 @@ fn parse_age(input: &str) -> Option<Result<DateTime<Utc>, String>> {
     Some(time.ok_or_else(|| format!("{input} is too far in the past")))
 }
 
-fn print_stats(stats: &erasecord_core::stats::Statistics, places: &[PackageTarget]) {
-    let day = |t: Option<chrono::DateTime<chrono::Utc>>| {
-        t.map(|t| {
-            t.with_timezone(&chrono::Local)
+fn bar(value: u64, max: u64, width: u64) -> String {
+    "#".repeat((value * width).div_ceil(max.max(1)) as usize)
+}
+
+fn print_overview(
+    o: &erasecord_core::insights::Overview,
+    places: &[erasecord_core::insights::Place],
+) {
+    let day = |t: Option<&erasecord_core::insights::MessageRef>| {
+        t.map(|m| {
+            m.sent_at
+                .with_timezone(&Local)
                 .format("%Y-%m-%d")
                 .to_string()
         })
         .unwrap_or_default()
     };
     println!(
-        "Messages      {} on {} days, {} to {}",
-        stats.messages,
-        stats.active_days,
-        day(stats.first_message),
-        day(stats.last_message)
+        "Messages      {} on {} of {} days, {} to {}",
+        o.messages,
+        o.active_days,
+        o.span_days,
+        day(o.first.as_ref()),
+        day(o.last.as_ref())
     );
+    println!("Places        {}", o.places);
     println!(
         "Words         {} ({} messages without text)",
-        stats.words, stats.without_text
+        o.words, o.without_text
     );
     println!(
         "Attachments   {} in {} messages",
-        stats.attachments, stats.with_attachments
+        o.attachments, o.with_attachments
     );
-    if let Some(busiest) = &stats.busiest_day {
+    println!("Links         {}", o.links);
+    if let Some(busiest) = &o.busiest_day {
         println!(
             "Busiest day   {} ({} messages)",
             busiest.date, busiest.messages
         );
     }
-    let hours: Vec<u64> = (0..24)
-        .map(|h| stats.week.iter().map(|d| d[h]).sum())
-        .collect();
-    if let Some((hour, _)) = hours.iter().enumerate().max_by_key(|(_, n)| **n) {
+    if let Some(streak) = &o.longest_streak {
         println!(
-            "Busiest hour  {hour:02}:00-{:02}:00 (local time)",
-            (hour + 1) % 24
+            "Longest streak {} days, {} to {}",
+            streak.days, streak.from, streak.to
         );
     }
-    let mut years: Vec<(&str, u64)> = Vec::new();
-    for month in &stats.months {
-        let year = &month.month[..4];
-        match years.last_mut() {
-            Some((y, n)) if *y == year => *n += month.messages,
-            _ => years.push((year, month.messages)),
-        }
+    if let Some(pause) = &o.longest_break {
+        println!(
+            "Longest break {} days, {} to {}",
+            pause.days, pause.from, pause.to
+        );
     }
-    if !years.is_empty() {
+    if !o.years.is_empty() {
         println!("\nPer year");
-        let max = years.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
-        for (year, n) in years {
-            let bar = "#".repeat(((n * 40).div_ceil(max)) as usize);
-            println!("  {year}  {n:>7}  {bar}");
+        let max = o.years.iter().map(|y| y.messages).max().unwrap_or(1);
+        for y in &o.years {
+            let top = y.top_place.map_or("", |p| places[p].name.as_str());
+            println!(
+                "  {}  {:>8}  {:<40}  most in {top}",
+                y.year,
+                y.messages,
+                bar(y.messages, max, 40)
+            );
         }
     }
-    let mut top: Vec<&PackageTarget> = places.iter().collect();
-    top.sort_by_key(|p| std::cmp::Reverse(p.messages));
-    if !top.is_empty() {
-        println!("\nWhere you write most");
-        for place in top.iter().take(10) {
-            println!("  {:>7}  {}", place.messages, place.target.name);
+}
+
+fn print_timeline(t: &erasecord_core::insights::Timeline) {
+    let hours: Vec<u64> = (0..24)
+        .map(|h| t.week_hours.iter().map(|d| d[h]).sum())
+        .collect();
+    let max = hours.iter().copied().max().unwrap_or(1);
+    println!("By hour (local time)");
+    for (hour, n) in hours.iter().enumerate() {
+        println!("  {hour:02}:00  {n:>8}  {}", bar(*n, max, 40));
+    }
+    let days: Vec<u64> = t.week_hours.iter().map(|d| d.iter().sum()).collect();
+    let max = days.iter().copied().max().unwrap_or(1);
+    println!("\nBy weekday");
+    for (name, n) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        .iter()
+        .zip(&days)
+    {
+        println!("  {name}    {n:>8}  {}", bar(*n, max, 40));
+    }
+    let max = t.months.iter().map(|m| m.total).max().unwrap_or(1);
+    println!("\nBy month");
+    for m in &t.months {
+        println!("  {}  {:>8}  {}", m.key, m.total, bar(m.total, max, 40));
+    }
+}
+
+fn print_places(
+    r: &erasecord_core::insights::PlacesReport,
+    places: &[erasecord_core::insights::Place],
+) {
+    for row in r.places.iter().take(30) {
+        println!("  {:>8}  {}", row.messages, places[row.place].name);
+    }
+    if r.places.len() > 30 {
+        println!("  … and {} more", r.places.len() - 30);
+    }
+    if !r.channels.is_empty() {
+        println!("\nChannels");
+        for c in r.channels.iter().take(20) {
+            println!(
+                "  {:>8}  #{} in {}",
+                c.messages, c.name, places[c.place].name
+            );
         }
-        if top.len() > 10 {
-            let rest: u64 = top[10..].iter().map(|p| p.messages).sum();
-            println!("  {rest:>7}  {} other places", top.len() - 10);
-        }
+    }
+}
+
+fn print_words(r: &erasecord_core::insights::WordsReport) {
+    println!("{} words, {} different", r.total_words, r.distinct_words);
+    for w in r.words.iter().take(30) {
+        println!("  {:>8}  {}", w.count, w.key);
+    }
+    if !r.emoji.is_empty() {
+        let emoji: Vec<String> = r
+            .emoji
+            .iter()
+            .take(15)
+            .map(|e| match e.id {
+                Some(_) => format!(":{}: {}", e.emoji, e.count),
+                None => format!("{} {}", e.emoji, e.count),
+            })
+            .collect();
+        println!("\nEmoji  {}", emoji.join("  "));
+    }
+}
+
+fn print_links(r: &erasecord_core::insights::LinksReport) {
+    println!("{} links in {} messages", r.links, r.messages_with_links);
+    for d in r.domains.iter().take(20) {
+        println!("  {:>8}  {}", d.count, d.key);
+    }
+    println!("\n{} attachments", r.attachments);
+    for k in r.kinds.iter().filter(|k| k.count > 0) {
+        println!("  {:>8}  {}", k.count, k.key);
     }
 }
 

@@ -6,7 +6,7 @@ members = ["crates/core", "crates/cli", "app/src-tauri"]
 default-members = ["crates/core", "crates/cli", "app/src-tauri"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/Rn11/erasecord"
@@ -18,3 +18,16 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+# The key derivation is slow on purpose; unoptimised it makes tests crawl.
+[profile.dev.package.scrypt]
+opt-level = 3
+
+[profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.chacha20poly1305]
+opt-level = 3

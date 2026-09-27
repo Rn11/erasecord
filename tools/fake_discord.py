@@ -21,6 +21,7 @@ import argparse
 import json
 import random
 import re
+import subprocess
 import threading
 import time
 import zipfile
@@ -44,6 +45,8 @@ GONE_CHANNEL = "3999"
 
 # Where attachments are served; set in main() once the port is known.
 FILES_BASE = "http://127.0.0.1:8765/files"
+# For the app's mock backend in a browser: (erasecord binary, package path).
+INSIGHTS = None
 
 lock = threading.Lock()
 messages = {}  # id -> message dict (plus "_guild")
@@ -150,6 +153,13 @@ def write_package(path):
     return len(mine)
 
 
+CORS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
@@ -253,7 +263,39 @@ class Handler(BaseHTTPRequestHandler):
         found.sort(key=lambda m: int(m["id"]), reverse=True)
         self.reply(200, {"total_results": len(found), "messages": [[public(m)] for m in found[:25]]})
 
+    def do_OPTIONS(self):
+        self.reply(204, headers=CORS)
+
+    def insights(self):
+        """Answers the app's Insights commands with the real CLI, so the app
+        can be tried in a browser with real numbers: POST /dev/insights with
+        {"section": "overview", "scope": {...}} or {"query": "..."}."""
+        if INSIGHTS is None:
+            return self.reply(404, {"message": "start with --insights-package"}, CORS)
+        binary, package = INSIGHTS
+        request = self.body()
+        scope = request.get("scope") or {}
+        args = []
+        for key, flag in (("from", "--from"), ("to", "--to")):
+            if scope.get(key):
+                args += [flag, scope[key]]
+        for place in scope.get("places") or []:
+            args += ["--place", str(place)]
+        for channel in scope.get("channels") or []:
+            args += ["--channel", str(channel)]
+        if "query" in request:
+            words = request["query"].split() or ["\u0000"]
+            command = [binary, "search", package, *words, "--limit", str(request.get("limit", 100)), "--json", *args]
+        else:
+            command = [binary, "stats", package, "--section", request["section"], "--json", *args]
+        done = subprocess.run(command, capture_output=True, text=True)
+        if done.returncode != 0:
+            return self.reply(500, {"message": done.stderr.strip()}, CORS)
+        return self.reply(200, json.loads(done.stdout), CORS)
+
     def do_POST(self):
+        if urlparse(self.path).path == "/dev/insights":
+            return self.insights()
         if not self.authorized():
             return
         if urlparse(self.path).path == "/api/v9/attachments/refresh-urls":
@@ -310,8 +352,13 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--write-package", metavar="PATH", help="also write a data package of your messages")
+    parser.add_argument("--insights-package", metavar="PATH",
+                        help="answer the app's Insights queries (in a browser) from this package")
+    parser.add_argument("--erasecord", default="target/debug/erasecord", help="the CLI used for --insights-package")
     args = parser.parse_args()
-    global FILES_BASE
+    global FILES_BASE, INSIGHTS
+    if args.insights_package:
+        INSIGHTS = (args.erasecord, args.insights_package)
     FILES_BASE = f"http://127.0.0.1:{args.port}/files"
     seed(random.Random(args.seed))
     mine = sum(1 for m in messages.values() if m["author"]["id"] == ME)

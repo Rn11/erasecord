@@ -18,6 +18,8 @@ pub enum ExportFormat {
     Csv,
     /// A JSON array of objects.
     Json,
+    /// One JSON object per line; stays readable when cut off.
+    JsonLines,
 }
 
 impl ExportFormat {
@@ -25,6 +27,7 @@ impl ExportFormat {
     pub fn for_path(path: &Path) -> Self {
         match path.extension().and_then(|e| e.to_str()) {
             Some(ext) if ext.eq_ignore_ascii_case("json") => ExportFormat::Json,
+            Some(ext) if ext.eq_ignore_ascii_case("jsonl") => ExportFormat::JsonLines,
             _ => ExportFormat::Csv,
         }
     }
@@ -62,6 +65,7 @@ impl<W: Write> ExportWriter<W> {
         match format {
             ExportFormat::Csv => write!(out, "\u{feff}{CSV_HEADER}")?,
             ExportFormat::Json => write!(out, "[")?,
+            ExportFormat::JsonLines => {}
         }
         Ok(ExportWriter {
             out,
@@ -137,6 +141,10 @@ impl<W: Write> ExportWriter<W> {
                 let separator = if self.rows == 0 { "\n  " } else { ",\n  " };
                 write!(self.out, "{separator}")?;
                 serde_json::to_writer(&mut self.out, row)?;
+            }
+            ExportFormat::JsonLines => {
+                serde_json::to_writer(&mut self.out, row)?;
+                writeln!(self.out)?;
             }
         }
         self.out.flush()

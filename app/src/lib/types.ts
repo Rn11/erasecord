@@ -87,6 +87,21 @@ export interface JobOptions {
   overwrite: string | null;
   /** Folder to save attachments to before deleting; null for no backup. */
   backup_dir: string | null;
+  /** Set by the backend for an encrypted backup; the app sends null. */
+  backup_encryption?: null;
+}
+
+/** A passphrase as typed, or the file it is in. */
+export interface PassphraseInput {
+  text?: string;
+  file?: string;
+}
+
+/** What opening a backup unpacked. */
+export interface Opened {
+  folder: string;
+  files: number;
+  messages: number;
 }
 
 export interface Stats {
@@ -141,6 +156,8 @@ export type JobEvent =
   | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
   | { type: "target_finished"; target_id: Snowflake; stats: Stats; complete: boolean }
   | { type: "notice"; notice: Notice }
+  | { type: "backup_sealed"; archive: string; files: number; messages: number }
+  | { type: "backup_kept"; folder: string; reason: string }
   | ({ type: "finished" } & Summary);
 
 export interface CommandError {
@@ -154,22 +171,7 @@ export interface UnfinishedRun {
   finished: Snowflake[];
   stats: Stats;
   from_package: boolean;
+  /** Continuing needs the backup's passphrase. */
+  encrypted_backup: boolean;
 }
 
-/** Statistics about the messages in the imported data package. */
-export interface Statistics {
-  messages: number;
-  with_attachments: number;
-  attachments: number;
-  without_text: number;
-  words: number;
-  characters: number;
-  first_message: string | null;
-  last_message: string | null;
-  /** Every month from the first message to the last, `YYYY-MM`. */
-  months: { month: string; messages: number }[];
-  /** Messages by weekday (Monday first) and hour, local time. */
-  week: number[][];
-  busiest_day: { date: string; messages: number } | null;
-  active_days: number;
-}

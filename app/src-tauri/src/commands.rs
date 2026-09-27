@@ -4,13 +4,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use erasecord_core::insights::{
+    Index, Info, LinksReport, Overview, PlacesReport, Scope, SearchResult, Timeline, WordsReport,
+};
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry, Stats};
-use erasecord_core::stats::Statistics;
+use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot, SecretString};
 use erasecord_core::{
     Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
     PackageTarget, SavedRun, Snowflake, Target, TargetKind, User,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::mpsc;
 
@@ -221,8 +224,54 @@ pub async fn start_job(
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
+    backup_passphrase: Option<PassphraseInput>,
 ) -> CommandResult<()> {
-    spawn_job(app, &state, None, targets, filter, options, None)
+    let passphrase = backup_passphrase
+        .map(PassphraseInput::resolve)
+        .transpose()?;
+    spawn_job(
+        app, &state, None, targets, filter, options, None, passphrase,
+    )
+}
+
+/// A passphrase as typed, or the file it is in (its first line).
+#[derive(Deserialize)]
+pub struct PassphraseInput {
+    text: Option<String>,
+    file: Option<PathBuf>,
+}
+
+impl PassphraseInput {
+    fn resolve(self) -> CommandResult<SecretString> {
+        match (self.text, self.file) {
+            (Some(text), _) if !text.is_empty() => Ok(vault::secret(&text)),
+            (_, Some(file)) => vault::read_passphrase_file(&file).map_err(|err| {
+                CommandError::other(format!("cannot read the passphrase file: {err}"))
+            }),
+            _ => Err(CommandError::other("a passphrase is needed".into())),
+        }
+    }
+}
+
+/// Twelve random words, for a new encrypted backup or export.
+#[tauri::command]
+pub fn generate_passphrase() -> String {
+    vault::generate_passphrase()
+}
+
+/// Decrypts and unpacks a backup (archive or parts folder) or an encrypted
+/// export into `into`.
+#[tauri::command]
+pub async fn open_backup(
+    path: PathBuf,
+    passphrase: PassphraseInput,
+    into: PathBuf,
+) -> CommandResult<vault::Opened> {
+    let passphrase = passphrase.resolve()?;
+    tauri::async_runtime::spawn_blocking(move || vault::open(&path, &passphrase, &into))
+        .await
+        .map_err(|err| CommandError::other(err.to_string()))?
+        .map_err(CommandError::other)
 }
 
 /// Like [`start_job`], with the messages of the imported data package.
@@ -233,24 +282,53 @@ pub async fn start_package_job(
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
+    backup_passphrase: Option<PassphraseInput>,
 ) -> CommandResult<()> {
     let package = state.package().ok_or_else(CommandError::no_package)?;
-    spawn_job(app, &state, Some(package), targets, filter, options, None)
+    // The package may have been opened before logging in.
+    package.0.check_owner(state.session()?.me.id)?;
+    let passphrase = backup_passphrase
+        .map(PassphraseInput::resolve)
+        .transpose()?;
+    spawn_job(
+        app,
+        &state,
+        Some(package),
+        targets,
+        filter,
+        options,
+        None,
+        passphrase,
+    )
 }
 
 /// Starts a clean-up. `saved` continues an earlier one. Real runs keep their
 /// progress in [`run_state_file`], so they can be continued after a stop or
 /// a crash; the file is removed once everything is done.
+#[allow(clippy::too_many_arguments)]
 fn spawn_job(
     app: AppHandle,
     state: &AppState,
     package: Option<(Arc<Package>, PathBuf)>,
     targets: Vec<Target>,
     filter: Filter,
-    options: JobOptions,
+    mut options: JobOptions,
     saved: Option<SavedRun>,
+    backup_passphrase: Option<SecretString>,
 ) -> CommandResult<()> {
     let session = state.session()?;
+    // A new encrypted backup: its folder and key are made before anything
+    // is deleted.
+    if let (Some(dir), Some(passphrase), None) = (
+        &options.backup_dir,
+        backup_passphrase,
+        &options.backup_encryption,
+    ) {
+        let (settings, keys) = EncryptedBackupSettings::create(dir, passphrase)
+            .map_err(|err| CommandError::other(format!("cannot use the backup folder: {err}")))?;
+        options.backup_encryption = Some(settings);
+        options.backup_keys = KeySlot(Some(Arc::new(keys)));
+    }
     let state_file = run_state_file(&app);
     let mut saved = if options.dry_run {
         None
@@ -270,7 +348,11 @@ fn spawn_job(
     // run, so a folder that cannot be written stops it before anything is
     // deleted.
     let mut backup_list =
-        match &options.backup_dir {
+        match options
+            .backup_dir
+            .as_ref()
+            .filter(|_| options.backup_encryption.is_none())
+        {
             Some(dir) => Some(backup_list(dir).map_err(|err| {
                 CommandError::other(format!("cannot use the backup folder: {err}"))
             })?),
@@ -351,6 +433,8 @@ pub struct UnfinishedRun {
     finished: Vec<Snowflake>,
     stats: Stats,
     from_package: bool,
+    /// Continuing needs the backup's passphrase.
+    encrypted_backup: bool,
 }
 
 impl UnfinishedRun {
@@ -360,6 +444,7 @@ impl UnfinishedRun {
             finished: saved.checkpoint.finished.clone(),
             stats: saved.checkpoint.stats,
             from_package: saved.package.is_some(),
+            encrypted_backup: saved.options.backup_encryption.is_some(),
         }
     }
 }
@@ -377,6 +462,7 @@ pub fn unfinished_run(app: AppHandle) -> Option<UnfinishedRun> {
 pub async fn resume_run(
     app: AppHandle,
     state: State<'_, AppState>,
+    passphrase: Option<PassphraseInput>,
 ) -> CommandResult<UnfinishedRun> {
     let file =
         run_state_file(&app).ok_or_else(|| CommandError::other("no app data folder".into()))?;
@@ -396,12 +482,34 @@ pub async fn resume_run(
         None => None,
     };
     let info = UnfinishedRun::of(&saved);
-    let (targets, filter, options) = (
+    let (targets, filter, mut options) = (
         saved.targets.clone(),
         saved.filter.clone(),
         saved.resume_options(),
     );
-    spawn_job(app, &state, package, targets, filter, options, Some(saved))?;
+    if let Some(settings) = &saved.options.backup_encryption {
+        let passphrase = passphrase
+            .ok_or_else(|| CommandError::other("the backup's passphrase is needed".into()))?
+            .resolve()?;
+        let keys = tauri::async_runtime::spawn_blocking({
+            let settings = settings.clone();
+            move || settings.unlock(passphrase)
+        })
+        .await
+        .map_err(|err| CommandError::other(err.to_string()))?
+        .map_err(CommandError::other)?;
+        options.backup_keys = KeySlot(Some(Arc::new(keys)));
+    }
+    spawn_job(
+        app,
+        &state,
+        package,
+        targets,
+        filter,
+        options,
+        Some(saved),
+        None,
+    )?;
     Ok(info)
 }
 
@@ -426,16 +534,42 @@ fn backup_list(dir: &std::path::Path) -> std::io::Result<ListWriter> {
 /// Saves what the last clean-up deleted (or would delete) to `path`: JSON
 /// for a .json file, CSV otherwise. Returns the number of messages.
 #[tauri::command]
-pub async fn export_run(state: State<'_, AppState>, path: PathBuf) -> CommandResult<u64> {
+pub async fn export_run(
+    state: State<'_, AppState>,
+    path: PathBuf,
+    passphrase: Option<PassphraseInput>,
+) -> CommandResult<u64> {
     let events = state.last_run();
+    let passphrase = passphrase.map(PassphraseInput::resolve).transpose()?;
     tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
+        // `list.csv.age` is a CSV file, encrypted.
+        let plain = if path.extension().is_some_and(|e| e == "age") {
+            path.with_extension("")
+        } else {
+            path.clone()
+        };
+        let format = ExportFormat::for_path(&plain);
         let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        let mut writer = ExportWriter::new(file, ExportFormat::for_path(&path))?;
-        for event in &events {
-            writer.observe(event)?;
-        }
-        let rows = writer.rows();
-        writer.finish()?;
+        let rows = match passphrase {
+            None => {
+                let mut writer = ExportWriter::new(file, format)?;
+                for event in &events {
+                    writer.observe(event)?;
+                }
+                let rows = writer.rows();
+                writer.finish()?;
+                rows
+            }
+            Some(passphrase) => {
+                let mut writer = ExportWriter::new(vault::encrypt(&passphrase, file)?, format)?;
+                for event in &events {
+                    writer.observe(event)?;
+                }
+                let rows = writer.rows();
+                writer.finish()?.finish()?;
+                rows
+            }
+        };
         Ok(rows)
     })
     .await
@@ -452,19 +586,34 @@ pub struct PackageSummary {
 }
 
 /// Reads a data package (a .zip file or an extracted folder) and keeps it
-/// for [`preview_package`] and [`start_package_job`].
+/// for [`preview_package`], [`start_package_job`] and Insights. Works
+/// without logging in; then nothing is sent anywhere, and the servers and
+/// DMs keep the names from the package.
 #[tauri::command]
 pub async fn import_package(
     state: State<'_, AppState>,
     path: PathBuf,
 ) -> CommandResult<PackageSummary> {
-    let session = state.session()?;
+    let session = state.session().ok();
     let source = path.clone();
-    let package = tauri::async_runtime::spawn_blocking(move || Package::open(&source))
-        .await
-        .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
-    package.check_owner(session.me.id)?;
+    let (package, index) = tauri::async_runtime::spawn_blocking(move || {
+        let package = Arc::new(Package::open(&source)?);
+        let index = Arc::new(Index::build(package.clone(), &chrono::Local));
+        Ok::<_, Error>((package, index))
+    })
+    .await
+    .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
     let mut targets = package.targets();
+    let Some(session) = session else {
+        let summary = PackageSummary {
+            messages: package.message_count(),
+            targets,
+            left_servers: Vec::new(),
+        };
+        state.set_package(Some((package, path, index)));
+        return Ok(summary);
+    };
+    package.check_owner(session.me.id)?;
     // The package knows the people in a DM only by ID; open conversations
     // lend their current names and pictures. Best effort: a failure here
     // leaves the package's names.
@@ -496,7 +645,7 @@ pub async fn import_package(
         targets,
         left_servers,
     };
-    state.set_package(Some((Arc::new(package), path)));
+    state.set_package(Some((package, path, index)));
     Ok(summary)
 }
 
@@ -514,6 +663,7 @@ pub async fn preview_package(
 ) -> CommandResult<Vec<PreviewEntry>> {
     let session = state.session()?;
     let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
+    package.check_owner(session.me.id)?;
     Ok(job::preview_package(
         &package,
         session.me.id,
@@ -522,16 +672,70 @@ pub async fn preview_package(
     )?)
 }
 
-/// Statistics about the imported package, in the given time zone.
-#[tauri::command]
-pub async fn package_stats(
-    state: State<'_, AppState>,
-    utc_offset_minutes: i32,
-) -> CommandResult<Statistics> {
-    let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
-    tauri::async_runtime::spawn_blocking(move || Statistics::of(&package, utc_offset_minutes))
+/// Runs an Insights query on the package's index, off the main thread.
+async fn insight<T: Send + 'static>(
+    state: &AppState,
+    query: impl FnOnce(&Index) -> T + Send + 'static,
+) -> CommandResult<T> {
+    let index = state.index().ok_or_else(CommandError::no_package)?;
+    tauri::async_runtime::spawn_blocking(move || query(&index))
         .await
         .map_err(|err| CommandError::other(err.to_string()))
+}
+
+#[tauri::command]
+pub async fn insights_info(state: State<'_, AppState>) -> CommandResult<Info> {
+    insight(&state, |index| index.info()).await
+}
+
+#[tauri::command]
+pub async fn insights_overview(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<Overview> {
+    insight(&state, move |index| index.overview(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_time(state: State<'_, AppState>, scope: Scope) -> CommandResult<Timeline> {
+    insight(&state, move |index| index.timeline(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_places(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<PlacesReport> {
+    insight(&state, move |index| index.places(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_words(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<WordsReport> {
+    insight(&state, move |index| index.words(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_links(
+    state: State<'_, AppState>,
+    scope: Scope,
+) -> CommandResult<LinksReport> {
+    insight(&state, move |index| index.links(&scope)).await
+}
+
+#[tauri::command]
+pub async fn insights_search(
+    state: State<'_, AppState>,
+    scope: Scope,
+    query: String,
+    limit: usize,
+) -> CommandResult<SearchResult> {
+    insight(&state, move |index| {
+        index.search(&scope, &query, limit.min(500))
+    })
+    .await
 }
 
 #[tauri::command]
