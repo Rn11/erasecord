@@ -4,7 +4,8 @@
   import { isTauri } from "@tauri-apps/api/core";
   import { open } from "@tauri-apps/plugin-dialog";
   import type { UnlistenFn } from "@tauri-apps/api/event";
-  import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
+  import { api, asCommandError, onJobEvent, onScanEvent } from "$lib/api";
+  import { applyScanEvent, countOf, fromPackage, newScan, totalOf, type ScanState } from "$lib/scan";
   import { errorMessage } from "$lib/errors";
   import { applyDocumentLanguage, num, t } from "$lib/i18n.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
@@ -19,7 +20,7 @@
   } from "$lib/format";
   import { forgetLastPackage, loadLastPackage, saveLastPackage, type LastPackage } from "$lib/lastPackage";
   import { loadLast, saveLast, snapshot } from "$lib/presets";
-  import { newChoice, passphraseInput, type PassphraseChoice } from "$lib/passphrase";
+  import { newChoice, passphraseInput, passphraseProblem, type PassphraseChoice } from "$lib/passphrase";
   import OpenBackup from "$lib/components/OpenBackup.svelte";
   import { findUpdate, skipVersion } from "$lib/updates";
   import type { Update } from "@tauri-apps/plugin-updater";
@@ -31,7 +32,7 @@
     JobOptions,
     PackageSummary,
     PassphraseInput,
-    PreviewEntry,
+    ExportSettings,
     Target,
     UnfinishedRun,
     User,
@@ -85,10 +86,10 @@
 
   // Fixed when counting starts, so the deletion uses exactly what was counted.
   let filter = $state<Filter>(toFilter({ mode: "all", amount: 1, unit: "days", from: "", to: "" }, true));
-  let previewTargets = $state<Target[]>([]);
-  let entries = $state<PreviewEntry[]>([]);
-  let counting = $state(false);
-  let previewError = $state<string | null>(null);
+  /** The count, and the messages found (kept in the backend's memory). */
+  let scan = $state<ScanState | null>(null);
+  /** Export the messages while deleting. */
+  let exportTo = $state<ExportSettings | null>(null);
 
   let run = $state<RunState | null>(null);
   /** Encrypt backups (recommended); the passphrase lives in memory only. */
@@ -111,7 +112,12 @@
   const selectedTargets = $derived(
     shownTargets.filter((t) => selected.has(t.id)).map((t) => ({ ...t, channels: channelPicks.get(t.id) ?? [] })),
   );
-  const busy = $derived(counting || (run !== null && run.summary === null));
+  const busy = $derived((scan?.running ?? false) || (run !== null && run.summary === null));
+  const saves = $derived(options.backup_dir !== null || exportTo !== null);
+  /** The passphrase set up for the backup and export, if any. */
+  const setupPassphrase = $derived(
+    saves && encrypt && passphrase && !passphraseProblem(passphrase) ? passphraseInput($state.snapshot(passphrase)) : null,
+  );
 
   const unlisten: UnlistenFn[] = [];
 
@@ -141,8 +147,8 @@
       await onJobEvent((event) => {
         if (run) applyEvent(run, event);
       }),
-      await onPreviewEntry((entry) => {
-        if (counting) entries.push(entry);
+      await onScanEvent((event) => {
+        if (scan) applyScanEvent(scan, event);
       }),
     );
     // Not urgent: look for a newer version once the app is up.
@@ -260,11 +266,11 @@
     unfinished = null;
   }
 
-  async function loadTargets() {
+  async function loadTargets(refresh = false) {
     targetsLoading = true;
     targetsError = null;
     try {
-      targets = await api.listTargets();
+      targets = await api.listTargets(refresh);
       friends = null;
       friendsError = null;
       // In package mode the lists show the package, not these targets.
@@ -439,38 +445,58 @@
     if (selectedTargets.length === 0 || rangeProblem(range) || contentProblem(content)) return;
     filter = toFilter(range, skipPinned, content);
     saveLast(snapshot($state.snapshot(range), $state.snapshot(content), skipPinned, $state.snapshot(options)));
-    previewTargets = selectedTargets;
-    entries = [];
-    previewError = null;
-    counting = true;
+    const targets = $state.snapshot(selectedTargets);
+    scan = newScan(targets);
     screen = "preview";
     try {
-      entries = pkg
-        ? await api.previewPackage($state.snapshot(previewTargets), $state.snapshot(filter))
-        : await api.preview($state.snapshot(previewTargets), $state.snapshot(filter), $state.snapshot(options));
+      if (pkg) {
+        const result = await api.previewPackage(targets, $state.snapshot(filter));
+        scan = fromPackage(targets, result.entries, result.stats);
+      } else {
+        await api.startScan(targets, $state.snapshot(filter), $state.snapshot(options));
+      }
     } catch (err) {
-      if (asCommandError(err).kind === "cancelled") screen = "setup";
-      else previewError = fail(err);
-    } finally {
-      counting = false;
+      const message = fail(err);
+      if (scan) {
+        scan.running = false;
+        scan.error = message;
+      }
     }
   }
 
+  async function backToSetup() {
+    if (scan?.running) await api.stopScan();
+    screen = "setup";
+  }
+
+  async function exportFound(path: string, pass: PassphraseInput | null) {
+    if (!scan) return 0;
+    return api.exportFound($state.snapshot(scan.targets), $state.snapshot(filter), path, pass);
+  }
+
   async function start(dryRun: boolean) {
+    if (!scan) return;
     // Places without matches need no work; failed searches get another try.
     // A new real run replaces the unfinished one.
     if (!dryRun) unfinished = null;
-    const runTargets = entries.filter((e) => e.count !== 0).map((e) => e.target);
-    const expected = entries.reduce((sum, e) => sum + (e.count ?? 0), 0);
-    run = newRun($state.snapshot(runTargets), expected, dryRun);
+    const current = scan;
+    const runTargets = current.targets.filter((t) => {
+      const p = current.places[t.id];
+      return !p || p.error !== null || countOf(p) > 0;
+    });
+    run = newRun($state.snapshot(runTargets), totalOf(current), dryRun);
     screen = "progress";
     try {
       const jobOptions = { ...$state.snapshot(options), dry_run: dryRun };
-      const backupPassphrase =
-        options.backup_dir !== null && encrypt && passphrase ? passphraseInput($state.snapshot(passphrase)) : null;
-      if (pkg) await api.startPackageJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions, backupPassphrase);
-      else await api.startJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions, backupPassphrase);
-      lastRunPassphrase = backupPassphrase;
+      const pass = setupPassphrase;
+      const backupPassphrase = options.backup_dir !== null ? pass : null;
+      const exportSettings = exportTo ? $state.snapshot(exportTo) : null;
+      const targets = $state.snapshot(runTargets);
+      const path = pkg
+        ? await api.startPackageJob(targets, $state.snapshot(filter), jobOptions, backupPassphrase, exportSettings)
+        : await api.startJob(targets, $state.snapshot(filter), jobOptions, backupPassphrase, exportSettings);
+      if (run) run.exportPath = path;
+      lastRunPassphrase = pass;
       // Every new backup gets new words.
       if (backupPassphrase && passphrase?.mode === "generated") void freshPassphrase();
     } catch (err) {
@@ -655,25 +681,30 @@
         bind:options
         bind:encrypt
         bind:passphrase
+        bind:exportTo
         onOpenBackup={() => (openingBackup = true)}
-        onReload={loadTargets}
+        onReload={() => loadTargets(true)}
         onCount={count}
       />
     {:else if screen === "preview"}
-      <Preview
-        targets={previewTargets}
-        {entries}
-        {counting}
-        exact={pkg !== null}
-        error={previewError}
-        {filter}
-        onBack={() => (screen = "setup")}
-        onCancel={() => api.cancelJob()}
-        onStart={start}
-      />
+      {#if scan}
+        <Preview
+          {scan}
+          {filter}
+          {options}
+          saving={{ backup: options.backup_dir !== null, export: exportTo !== null }}
+          passphrase={setupPassphrase}
+          onBack={backToSetup}
+          onStop={() => api.stopScan()}
+          onStart={start}
+          onExport={exportFound}
+        />
+      {/if}
     {:else if screen === "progress" && run}
       <Progress
         {run}
+        {filter}
+        onDeleteNow={() => start(false)}
         backupPassphrase={lastRunPassphrase}
         onPause={pause}
         onResume={resume}

@@ -1,26 +1,30 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-  import { save } from "@tauri-apps/plugin-dialog";
   import { api } from "$lib/api";
-  import { errorMessage } from "$lib/errors";
-  import { formatDuration, targetLabel } from "$lib/format";
+  import { describePlaces, formatDuration, targetLabel } from "$lib/format";
   import { i18n, num, t } from "$lib/i18n.svelte";
   import { activeMs, processed, type RunState } from "$lib/run";
-  import { newChoice, passphraseInput, passphraseProblem, type PassphraseChoice } from "$lib/passphrase";
   import { revealItemInDir } from "@tauri-apps/plugin-opener";
-  import type { PassphraseInput } from "$lib/types";
+  import type { Filter, PassphraseInput } from "$lib/types";
   import Avatar from "./Avatar.svelte";
-  import Passphrase from "./Passphrase.svelte";
+  import ConfirmDelete from "./ConfirmDelete.svelte";
+  import ExportPanel from "./ExportPanel.svelte";
+  import StatusLine from "./StatusLine.svelte";
 
   let {
     run,
+    filter,
     backupPassphrase = null,
+    onDeleteNow,
     onPause,
     onResume,
     onStop,
     onDone,
   }: {
     run: RunState;
+    filter: Filter;
+    /** Deletes what a dry run found. */
+    onDeleteNow: () => void;
     /** The passphrase of this run's encrypted backup, reused for its list. */
     backupPassphrase?: PassphraseInput | null;
     onPause: () => void;
@@ -70,57 +74,17 @@
     if (logBox) follow = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 40;
   }
 
-  let exporting = $state(false);
-  let exportResult = $state<{ rows: number; path: string } | { error: string } | null>(null);
-
-  // Saving the list: encrypted by default, with the backup's passphrase if
-  // the run had an encrypted backup.
   let choosing = $state(false);
-  let encryptList = $state(true);
-  let listChoice = $state<PassphraseChoice | null>(null);
-  const listProblem = $derived(
-    encryptList && !backupPassphrase ? (listChoice ? passphraseProblem(listChoice) : t("pass.confirmNeeded")) : null,
+  let confirm: ConfirmDelete | undefined = $state();
+  const names = $derived(new Map(run.targets.map((p) => [p.target.id, p.target.name])));
+  const placeName = (id: string) => names.get(id) ?? "";
+  const wouldDelete = $derived(run.totals.deleted);
+  const places = $derived(
+    describePlaces(
+      run.targets.filter((p) => p.stats.deleted > 0 && p.target.kind === "guild").length,
+      run.targets.filter((p) => p.stats.deleted > 0 && p.target.kind !== "guild").length,
+    ),
   );
-
-  async function startSaving() {
-    choosing = true;
-    exportResult = null;
-    if (!backupPassphrase && !listChoice) {
-      try {
-        listChoice = newChoice(await api.generatePassphrase());
-      } catch {
-        listChoice = null;
-      }
-    }
-  }
-
-  async function exportList() {
-    exportResult = null;
-    const day = new Date().toISOString().slice(0, 10);
-    const passphrase = encryptList ? (backupPassphrase ?? (listChoice ? passphraseInput(listChoice) : null)) : null;
-    const name = `erasecord-${run.dryRun ? "dry-run" : "deleted"}-${day}.csv${passphrase ? ".age" : ""}`;
-    try {
-      const path = await save({
-        title: t("progress.saveTitle"),
-        defaultPath: name,
-        filters: passphrase
-          ? [{ name: t("progress.encryptedList"), extensions: ["age"] }]
-          : [
-              { name: t("progress.csv"), extensions: ["csv"] },
-              { name: "JSON", extensions: ["json"] },
-            ],
-      });
-      if (!path) return;
-      exporting = true;
-      const rows = await api.exportRun(path, passphrase);
-      choosing = false;
-      exportResult = { rows, path };
-    } catch (err) {
-      exportResult = { error: errorMessage(err) };
-    } finally {
-      exporting = false;
-    }
-  }
 
   const time = (at: number) => new Date(at).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 </script>
@@ -128,21 +92,29 @@
 <div class="progress">
   <section class="card head">
     <div class="title-row">
-      <h2>
-        {#if !finished && !paused}<span class="spinner"></span>{/if}
-        {title}
-      </h2>
+      <div class="heading">
+        <h2>
+          {#if !finished && !paused}<span class="spinner"></span>{/if}
+          {title}
+        </h2>
+        <StatusLine activity={run.activity} waiting={run.waiting} {placeName} busy={!finished} {paused} />
+      </div>
       <div class="actions">
         {#if finished}
           <button
             class="btn"
-            onclick={startSaving}
-            disabled={exporting || choosing || run.totals.deleted === 0}
+            onclick={() => (choosing = true)}
+            disabled={choosing || run.totals.deleted === 0}
             title={t("progress.saveHint")}
           >
-            {#if exporting}<span class="spinner"></span>{/if} {t("progress.saveList")}
+            {run.dryRun ? t("progress.exportFound") : t("progress.exportDeleted")}
           </button>
-          <button class="btn primary" onclick={onDone}>{t("progress.newRun")}</button>
+          <button class="btn" class:primary={!run.dryRun} onclick={onDone}>{t("progress.backToSettings")}</button>
+          {#if run.dryRun && !run.summary?.error && wouldDelete > 0}
+            <button class="btn danger" onclick={() => confirm?.open()}>
+              {t("progress.deleteNow", { count: wouldDelete })}
+            </button>
+          {/if}
         {:else}
           {#if paused}
             <button class="btn" onclick={onResume}>{t("progress.resume")}</button>
@@ -197,33 +169,22 @@
     {:else if run.backup}
       <p class="callout small warn">{t("progress.backupKept", { reason: run.backup.reason })}</p>
     {/if}
-    {#if choosing}
-      <div class="save-panel small">
-        <label class="choice">
-          <input type="checkbox" bind:checked={encryptList} />
-          <span>{t("progress.encryptList")}</span>
-        </label>
-        {#if encryptList && backupPassphrase}
-          <span class="muted">{t("progress.sameAsBackup")}</span>
-        {:else if encryptList && listChoice}
-          <Passphrase bind:choice={listChoice} />
-        {:else if !encryptList}
-          <span class="warn-text">{t("progress.plainList")}</span>
+    {#if run.exportPath}
+      <p class="callout small info backup">
+        <span>{finished ? t("progress.exportedTo") : t("progress.exportingTo")}</span>
+        <code title={run.exportPath}>{run.exportPath}</code>
+        {#if finished}
+          <button class="link" onclick={() => run.exportPath && revealItemInDir(run.exportPath)}>{t("open.show")}</button>
         {/if}
-        {#if listProblem}<span class="muted">{listProblem}</span>{/if}
-        <div class="save-actions">
-          <button class="btn small ghost" onclick={() => (choosing = false)}>{t("common.cancel")}</button>
-          <button class="btn small primary" onclick={exportList} disabled={exporting || !!listProblem}>
-            {#if exporting}<span class="spinner"></span>{/if}
-            {t("progress.saveList")}
-          </button>
-        </div>
-      </div>
+      </p>
     {/if}
-    {#if exportResult && "error" in exportResult}
-      <p class="callout small error">{exportResult.error}</p>
-    {:else if exportResult}
-      <p class="callout small info">{t("progress.saved", { count: exportResult.rows, path: exportResult.path })}</p>
+    {#if choosing}
+      <ExportPanel
+        name="erasecord-{run.dryRun ? 'dry-run' : 'deleted'}-{new Date().toISOString().slice(0, 10)}"
+        knownPassphrase={backupPassphrase}
+        write={(path, passphrase) => api.exportRun(path, passphrase)}
+        onClose={() => (choosing = false)}
+      />
     {/if}
     {#if run.summary?.error}
       <p class="callout error small">{run.summary.error}</p>
@@ -231,6 +192,8 @@
       <p class="callout info small">{t("progress.dryNote")}</p>
     {/if}
   </section>
+
+  <ConfirmDelete bind:this={confirm} count={wouldDelete} upTo={false} {places} {filter} onConfirm={onDeleteNow} />
 
   <div class="columns">
     <section class="card targets" aria-label={t("progress.targetsLabel")}>
@@ -294,29 +257,9 @@
     cursor: pointer;
   }
 
-  .save-panel {
-    display: grid;
-    gap: 8px;
-    padding: 12px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-  }
 
-  .choice {
-    display: flex;
-    gap: 8px;
-    align-items: center;
-  }
 
-  .warn-text {
-    color: var(--warn);
-  }
 
-  .save-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
 
   .progress {
     display: grid;
@@ -330,6 +273,12 @@
     padding: 18px 20px;
     display: grid;
     gap: 14px;
+  }
+
+  .heading {
+    display: grid;
+    gap: 4px;
+    min-width: 0;
   }
 
   .title-row {

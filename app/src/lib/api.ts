@@ -24,7 +24,9 @@ import type {
   PassphraseInput,
   PackageSummary,
   UnfinishedRun,
-  PreviewEntry,
+  ExportSettings,
+  PackagePreview,
+  ScanEvent,
   Target,
   User,
 } from "./types";
@@ -33,14 +35,22 @@ export const api = {
   login: (token: string, remember: boolean) => invoke<LoginResult>("login", { token, remember }),
   restoreSession: () => invoke<User | null>("restore_session"),
   logout: () => invoke<void>("logout"),
-  listTargets: () => invoke<Target[]>("list_targets"),
+  listTargets: (refresh = false) => invoke<Target[]>("list_targets", { refresh }),
   listChannels: (guildId: string) => invoke<GuildChannel[]>("list_channels", { guildId }),
   listFriends: () => invoke<Friend[]>("list_friends"),
   openDm: (userId: string) => invoke<Target>("open_dm", { userId }),
-  preview: (targets: Target[], filter: Filter, options: JobOptions) =>
-    invoke<PreviewEntry[]>("preview", { targets, filter, options }),
-  startJob: (targets: Target[], filter: Filter, options: JobOptions, backupPassphrase: PassphraseInput | null) =>
-    invoke<void>("start_job", { targets, filter, options, backupPassphrase }),
+  startScan: (targets: Target[], filter: Filter, options: JobOptions) =>
+    invoke<void>("start_scan", { targets, filter, options }),
+  stopScan: () => invoke<void>("stop_scan"),
+  exportFound: (targets: Target[], filter: Filter, path: string, passphrase: PassphraseInput | null) =>
+    invoke<number>("export_found", { targets, filter, path, passphrase }),
+  startJob: (
+    targets: Target[],
+    filter: Filter,
+    options: JobOptions,
+    backupPassphrase: PassphraseInput | null,
+    exportTo: ExportSettings | null,
+  ) => invoke<string | null>("start_job", { targets, filter, options, backupPassphrase, export: exportTo }),
   importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
   closePackage: () => invoke<void>("close_package"),
   insightsInfo: () => invoke<Info>("insights_info"),
@@ -52,9 +62,14 @@ export const api = {
   insightsSearch: (scope: Scope, query: string, limit: number) =>
     invoke<SearchResult>("insights_search", { scope, query, limit }),
   previewPackage: (targets: Target[], filter: Filter) =>
-    invoke<PreviewEntry[]>("preview_package", { targets, filter }),
-  startPackageJob: (targets: Target[], filter: Filter, options: JobOptions, backupPassphrase: PassphraseInput | null) =>
-    invoke<void>("start_package_job", { targets, filter, options, backupPassphrase }),
+    invoke<PackagePreview>("preview_package", { targets, filter }),
+  startPackageJob: (
+    targets: Target[],
+    filter: Filter,
+    options: JobOptions,
+    backupPassphrase: PassphraseInput | null,
+    exportTo: ExportSettings | null,
+  ) => invoke<string | null>("start_package_job", { targets, filter, options, backupPassphrase, export: exportTo }),
   exportRun: (path: string, passphrase: PassphraseInput | null) => invoke<number>("export_run", { path, passphrase }),
   generatePassphrase: () => invoke<string>("generate_passphrase"),
   openBackup: (path: string, passphrase: PassphraseInput, into: string) =>
@@ -71,8 +86,8 @@ export function onJobEvent(handler: (event: JobEvent) => void): Promise<Unlisten
   return listen<JobEvent>("job-event", (event) => handler(event.payload));
 }
 
-export function onPreviewEntry(handler: (entry: PreviewEntry) => void): Promise<UnlistenFn> {
-  return listen<PreviewEntry>("preview-entry", (event) => handler(event.payload));
+export function onScanEvent(handler: (event: ScanEvent) => void): Promise<UnlistenFn> {
+  return listen<ScanEvent>("scan-event", (event) => handler(event.payload));
 }
 
 export function asCommandError(err: unknown): CommandError {
