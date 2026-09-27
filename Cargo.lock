@@ -1259,6 +1259,7 @@ name = "erasecord-core"
 version = "0.2.0"
 dependencies = [
  "chrono",
+ "rand",
  "regex",
  "reqwest",
  "serde",

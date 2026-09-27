@@ -8,6 +8,7 @@ description = "Core of EraseCord: find and delete your own Discord messages"
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std", "serde"] }
+rand = "0.10.3"
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "query", "rustls", "http2", "system-proxy"] }
 serde = { version = "1.0.229", features = ["derive"] }

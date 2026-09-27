@@ -5,12 +5,14 @@
 //! Everything here is independent of the user interface; the CLI and the
 //! desktop app are thin layers on top.
 
+pub mod anonymize;
 pub mod backup;
 pub mod client;
 pub mod delete;
 pub mod error;
 pub mod export;
 pub mod filter;
+pub mod inspect;
 pub mod job;
 pub mod models;
 pub mod package;

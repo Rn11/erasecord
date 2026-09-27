@@ -504,7 +504,7 @@ fn parse_csv_messages(data: &[u8]) -> Result<Vec<PackageMessage>, String> {
 }
 
 /// RFC 4180 CSV: quoted fields may contain commas, newlines and `""`.
-fn parse_csv(text: &str) -> Vec<Vec<String>> {
+pub(crate) fn parse_csv(text: &str) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = String::new();

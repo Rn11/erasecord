@@ -83,6 +83,28 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Describe the structure of a data package without any of its content: file and
+    /// field names, counts and kinds of values, but no messages, names, IDs or dates.
+    /// Safe to share, e.g. to help support a new package format. Needs no token.
+    InspectPackage {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// Print JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a copy of a data package with every value replaced: random words for
+    /// text, placeholders for names, new IDs and links, dates moved back by a random
+    /// number of weeks. For testing with realistic data. Needs no token.
+    AnonymizePackage {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// The new .zip file to write.
+        #[arg(value_name = "OUTPUT")]
+        output: PathBuf,
+    },
     /// Continue a clean-up that was started with `delete --state FILE` and did not
     /// finish, with exactly the servers, DMs and conditions it had.
     Resume {
@@ -217,7 +239,10 @@ impl Command {
                 selection.package.as_deref()
             }
             Command::Stats { package, .. } => Some(package),
-            Command::Channels { .. } | Command::Resume { .. } => None,
+            Command::Channels { .. }
+            | Command::Resume { .. }
+            | Command::InspectPackage { .. }
+            | Command::AnonymizePackage { .. } => None,
         }
     }
 
@@ -227,7 +252,9 @@ impl Command {
             Command::List { .. }
             | Command::Channels { .. }
             | Command::Resume { .. }
-            | Command::Stats { .. } => return Ok(()),
+            | Command::Stats { .. }
+            | Command::InspectPackage { .. }
+            | Command::AnonymizePackage { .. } => return Ok(()),
             Command::Preview {
                 selection,
                 range,
@@ -279,6 +306,43 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
+    match &cli.command {
+        Command::InspectPackage { package, json } => {
+            eprintln!("Reading {}…", package.display());
+            let report = erasecord_core::inspect::inspect(package)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                print!("{}", report.to_text());
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        Command::AnonymizePackage { package, output } => {
+            eprintln!("Reading {}…", package.display());
+            let summary = erasecord_core::anonymize::anonymize(package, output)?;
+            println!(
+                "Wrote an anonymized copy to {}: {} files with {} records.",
+                output.display(),
+                summary.files,
+                summary.records
+            );
+            println!(
+                "Every text, name, ID, link and number was replaced, and dates were moved back \
+                 by a random number of weeks (not recorded anywhere)."
+            );
+            if !summary.omitted.is_empty() {
+                let omitted: Vec<String> = summary
+                    .omitted
+                    .iter()
+                    .map(|(kind, count)| format!("{count} {kind}"))
+                    .collect();
+                println!("Left out: {}.", omitted.join(", "));
+            }
+            println!("Please look through the copy before you share it.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        _ => {}
+    }
     cli.command.check()?;
     let package = match cli.command.package_path() {
         Some(path) => Some(Arc::new(load_package(path)?)),
@@ -310,6 +374,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
+        Command::InspectPackage { .. } | Command::AnonymizePackage { .. } => {
+            unreachable!("handled before logging in")
+        }
         Command::Stats { json, .. } => {
             let package = package.expect("package loaded");
             let offset = chrono::Local::now().offset().local_minus_utc() / 60;
