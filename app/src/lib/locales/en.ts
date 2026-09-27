@@ -122,6 +122,19 @@ export const en = {
   "setup.backupPick": "Choose a folder for the backup",
   "setup.backupHint":
     "Images and files are saved to this folder first, together with a list of all messages. A message whose files cannot be saved is kept. A dry run only backs up and deletes nothing.",
+  "presets.label": "Presets",
+  "presets.choose": "Choose a preset…",
+  "presets.none": "No presets yet",
+  "presets.save": "Save as preset…",
+  "presets.name": "Name of the preset",
+  "presets.store": "Save",
+  "presets.delete": "Delete preset",
+  "presets.hint": "A preset remembers these settings and the selected servers and DMs.",
+  "presets.missing": {
+    one: "{count} saved server or DM is not in the list and was not selected.",
+    other: "{count} saved servers and DMs are not in the list and were not selected.",
+  },
+
   "setup.speed": "Speed",
   "setup.deleteDelay": "Pause after each deletion",
   "setup.searchDelay": "Pause between searches",

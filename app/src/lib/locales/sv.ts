@@ -120,6 +120,19 @@ export const sv: Dictionary = {
   "setup.backupPick": "Välj en mapp för säkerhetskopian",
   "setup.backupHint":
     "Bilder och filer sparas först i den här mappen, tillsammans med en lista över alla meddelanden. Ett meddelande vars filer inte kan sparas behålls. En testkörning säkerhetskopierar bara och raderar ingenting.",
+  "presets.label": "Förval",
+  "presets.choose": "Välj ett förval…",
+  "presets.none": "Inga förval än",
+  "presets.save": "Spara som förval…",
+  "presets.name": "Förvalets namn",
+  "presets.store": "Spara",
+  "presets.delete": "Ta bort förval",
+  "presets.hint": "Ett förval kommer ihåg de här inställningarna och de valda servrarna och DM:en.",
+  "presets.missing": {
+    one: "{count} sparad server eller DM finns inte i listan och valdes inte.",
+    other: "{count} sparade servrar och DM finns inte i listan och valdes inte.",
+  },
+
   "setup.speed": "Hastighet",
   "setup.deleteDelay": "Paus efter varje radering",
   "setup.searchDelay": "Paus mellan sökningar",

@@ -11,12 +11,12 @@
   import {
     contentProblem,
     displayName,
-    emptyContent,
     rangeProblem,
     toFilter,
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
+  import { loadLast, saveLast, snapshot } from "$lib/presets";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type {
     Filter,
@@ -58,10 +58,12 @@
   let friendsLoading = $state(false);
   let friendsError = $state<string | null>(null);
   const opening = new SvelteSet<string>();
-  let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
-  let content = $state<ContentForm>(emptyContent());
-  let skipPinned = $state(true);
-  let options = $state<JobOptions>({ delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, dry_run: false, overwrite: null, backup_dir: null });
+  // The settings used last time.
+  const last = loadLast();
+  let range = $state<RangeForm>(last.range);
+  let content = $state<ContentForm>(last.content);
+  let skipPinned = $state(last.skipPinned);
+  let options = $state<JobOptions>({ ...last.options, dry_run: false });
 
   // Fixed when counting starts, so the deletion uses exactly what was counted.
   let filter = $state<Filter>(toFilter({ mode: "all", amount: 1, unit: "days", from: "", to: "" }, true));
@@ -289,6 +291,7 @@
   async function count() {
     if (selectedTargets.length === 0 || rangeProblem(range) || contentProblem(content)) return;
     filter = toFilter(range, skipPinned, content);
+    saveLast(snapshot($state.snapshot(range), $state.snapshot(content), skipPinned, $state.snapshot(options)));
     previewTargets = selectedTargets;
     entries = [];
     previewError = null;

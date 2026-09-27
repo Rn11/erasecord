@@ -120,6 +120,19 @@ export const es: Dictionary = {
   "setup.backupPick": "Elige una carpeta para la copia",
   "setup.backupHint":
     "Las imágenes y los archivos se guardan primero en esta carpeta, junto con una lista de todos los mensajes. Un mensaje cuyos archivos no se puedan guardar se conserva. Una prueba solo hace la copia y no borra nada.",
+  "presets.label": "Ajustes guardados",
+  "presets.choose": "Elige un ajuste guardado…",
+  "presets.none": "Aún no hay ajustes guardados",
+  "presets.save": "Guardar ajustes…",
+  "presets.name": "Nombre",
+  "presets.store": "Guardar",
+  "presets.delete": "Eliminar ajuste guardado",
+  "presets.hint": "Guarda estos ajustes junto con los servidores y MD seleccionados.",
+  "presets.missing": {
+    one: "{count} servidor o MD guardado no está en la lista y no se ha seleccionado.",
+    other: "{count} servidores y MD guardados no están en la lista y no se han seleccionado.",
+  },
+
   "setup.speed": "Velocidad",
   "setup.deleteDelay": "Pausa tras cada borrado",
   "setup.searchDelay": "Pausa entre búsquedas",

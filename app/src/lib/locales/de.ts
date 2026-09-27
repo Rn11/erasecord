@@ -121,6 +121,19 @@ export const de: Dictionary = {
   "setup.backupPick": "Ordner für die Sicherung wählen",
   "setup.backupHint":
     "Bilder und Dateien werden zuerst in diesem Ordner gespeichert, zusammen mit einer Liste aller Nachrichten. Eine Nachricht, deren Dateien sich nicht speichern lassen, wird behalten. Ein Probelauf sichert nur und löscht nichts.",
+  "presets.label": "Vorlagen",
+  "presets.choose": "Vorlage wählen…",
+  "presets.none": "Noch keine Vorlagen",
+  "presets.save": "Als Vorlage speichern…",
+  "presets.name": "Name der Vorlage",
+  "presets.store": "Speichern",
+  "presets.delete": "Vorlage löschen",
+  "presets.hint": "Eine Vorlage merkt sich diese Einstellungen und die ausgewählten Server und DMs.",
+  "presets.missing": {
+    one: "{count} gespeicherter Server oder DM ist nicht in der Liste und wurde nicht ausgewählt.",
+    other: "{count} gespeicherte Server und DMs sind nicht in der Liste und wurden nicht ausgewählt.",
+  },
+
   "setup.speed": "Geschwindigkeit",
   "setup.deleteDelay": "Pause nach jeder Löschung",
   "setup.searchDelay": "Pause zwischen Suchen",
