@@ -335,6 +335,17 @@ export function installMockBackend() {
           void simulate(run.targets, run.filter, false, false, run, run.encrypted_backup);
           return run;
         }
+        case "plugin:updater|check":
+          // Add ?update to the address to try the update banner.
+          return location.search.includes("update")
+            ? { rid: 1, currentVersion: "0.3.0", version: "0.3.1", date: null, body: "- Faster charts\n- Fixes", rawJson: {} }
+            : null;
+        case "plugin:updater|download_and_install":
+          await sleep(1500);
+          return null;
+        case "plugin:process|restart":
+          location.reload();
+          return null;
         case "plugin:opener|reveal_item_in_dir":
           return null;
         case "generate_passphrase":

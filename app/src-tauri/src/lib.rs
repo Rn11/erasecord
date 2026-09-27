@@ -3,9 +3,15 @@ mod state;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init());
+    // Updates are checked against the signed latest.json of the newest
+    // GitHub release; see plugins.updater in tauri.conf.json.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    builder
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::login,

@@ -21,6 +21,8 @@
   import { loadLast, saveLast, snapshot } from "$lib/presets";
   import { newChoice, passphraseInput, type PassphraseChoice } from "$lib/passphrase";
   import OpenBackup from "$lib/components/OpenBackup.svelte";
+  import { findUpdate, skipVersion } from "$lib/updates";
+  import type { Update } from "@tauri-apps/plugin-updater";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type {
     Filter,
@@ -98,6 +100,10 @@
   let resumePassFile = $state<string | null>(null);
   let resumeError = $state<string | null>(null);
   let openingBackup = $state(false);
+  /** A newer version, if there is one. */
+  let update = $state<Update | null>(null);
+  let updating = $state<{ done: number; total: number | null } | null>(null);
+  let updateError = $state<string | null>(null);
   /** A clean-up that was stopped or cut short and can be continued. */
   let unfinished = $state<UnfinishedRun | null>(null);
 
@@ -139,6 +145,8 @@
         if (counting) entries.push(entry);
       }),
     );
+    // Not urgent: look for a newer version once the app is up.
+    setTimeout(async () => (update = await findUpdate()), 3000);
     try {
       const restored = await api.restoreSession();
       if (restored) await enter(restored);
@@ -213,6 +221,24 @@
   async function pickResumePassFile() {
     const file = await open({ multiple: false, directory: false, title: t("pass.pickFile") });
     if (typeof file === "string") resumePassFile = file;
+  }
+
+  async function installUpdate() {
+    if (!update || busy) return;
+    updateError = null;
+    updating = { done: 0, total: null };
+    try {
+      await update.downloadAndInstall((event) => {
+        if (!updating) return;
+        if (event.event === "Started") updating.total = event.data.contentLength ?? null;
+        else if (event.event === "Progress") updating.done += event.data.chunkLength;
+      });
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (err) {
+      updateError = errorMessage(err);
+      updating = null;
+    }
   }
 
   /** A fresh passphrase for the next encrypted backup. */
@@ -515,6 +541,35 @@
   {/if}
 
   <main class:padded={tab === "insights" || (screen !== "login" && screen !== "starting")}>
+    {#if update && screen !== "starting"}
+      <div class="callout info small notice update">
+        <span>
+          <strong>{t("update.available", { version: update.version })}</strong>
+          {#if update.body}
+            <details class="notes">
+              <summary>{t("update.whatsNew")}</summary>
+              <pre>{update.body}</pre>
+            </details>
+          {/if}
+          {#if updating}
+            <span class="muted">
+              {t("update.downloading")}
+              {#if updating.total}{Math.round((updating.done / updating.total) * 100)} %{/if}
+            </span>
+          {/if}
+          {#if updateError}<span class="error-text">{updateError}</span>{/if}
+        </span>
+        <span class="resume-actions">
+          <button class="link small" onclick={() => update && (skipVersion(update.version), (update = null))} disabled={!!updating}>
+            {t("update.skip")}
+          </button>
+          <button class="btn small" onclick={() => (update = null)} disabled={!!updating}>{t("update.later")}</button>
+          <button class="btn primary small" onclick={installUpdate} disabled={!!updating || busy} title={busy ? t("update.busy") : ""}>
+            {t("update.install")}
+          </button>
+        </span>
+      </div>
+    {/if}
     {#if tab === "cleanup" && screen === "setup" && unfinished}
       <div class="callout warn small notice resume">
         <span>
@@ -712,6 +767,18 @@
     justify-content: space-between;
     gap: 8px;
     flex: none !important;
+  }
+
+  .notes pre {
+    white-space: pre-wrap;
+    font: inherit;
+    margin: 6px 0 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+
+  .error-text {
+    color: var(--danger);
   }
 
   .resume-pass {

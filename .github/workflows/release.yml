@@ -102,9 +102,24 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # Updates are signed with the key in the repository secrets. Without
+      # it the release is still built, just without update files.
+      - name: Check the update signing key
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set; building without updater files"
+            jq '.bundle.createUpdaterArtifacts = false' app/src-tauri/tauri.conf.json > conf.tmp
+            mv conf.tmp app/src-tauri/tauri.conf.json
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: app
           tagName: ${{ needs.version.outputs.tag }}
