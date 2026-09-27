@@ -232,7 +232,7 @@ s](https://github.com/victornpb/undiscord/discussions/414) to avoid that. EraseC
   (up to four times the setting) for the rest of the run;
 - messages are searched for once, not again for the dry run and the clean-up.
 
-That makes about 1,000 deletions an hour. The pauses can be changed under *Speed* (app) or with
+That makes about 1,100 deletions an hour. The pauses can be changed under *Speed* (app) or with
 `--delete-delay` and `--search-delay` (CLI), but shorter ones make rate limits and attention from Discord more
 likely.
 
