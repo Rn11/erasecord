@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::backup::Backup;
 use crate::client::{Client, Notice};
 use crate::delete::{self, Outcome, SkipReason};
 use crate::error::{Error, Result};
@@ -18,6 +20,7 @@ pub use crate::filter::Filter;
 use crate::filter::Matcher;
 use crate::models::Message;
 use crate::package::Package;
+use crate::resume::Checkpoint;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
@@ -38,6 +41,12 @@ pub struct JobOptions {
     /// attachments, so the original is gone even where Discord keeps deleted
     /// messages around. An empty text means random letters.
     pub overwrite: Option<String>,
+    /// Before deleting a message, save its attachments into this folder. A
+    /// message whose attachments cannot be saved is not deleted. Also done in
+    /// a dry run, which then backs up without deleting anything.
+    pub backup_dir: Option<PathBuf>,
+    /// Continue an earlier run: skip what it finished and dealt with.
+    pub resume: Option<Checkpoint>,
 }
 
 impl Default for JobOptions {
@@ -48,6 +57,8 @@ impl Default for JobOptions {
             max_rounds: 3,
             dry_run: false,
             overwrite: None,
+            backup_dir: None,
+            resume: None,
         }
     }
 }
@@ -108,6 +119,8 @@ pub enum Event {
         content: String,
         /// Attachment URLs, for exports.
         attachments: Vec<String>,
+        /// Where the attachments were saved, relative to the backup folder.
+        saved: Vec<String>,
         dry_run: bool,
     },
     Skipped {
@@ -136,6 +149,8 @@ pub enum Event {
     TargetFinished {
         target_id: Snowflake,
         stats: Stats,
+        /// False when the target was interrupted or could not be searched.
+        complete: bool,
     },
     Notice {
         notice: Notice,
@@ -373,6 +388,18 @@ async fn run_from(
             return summary;
         }
     };
+    let backup = match options.backup_dir.as_deref().map(Backup::new).transpose() {
+        Ok(backup) => backup,
+        Err(err) => {
+            let summary = Summary {
+                stats: Stats::default(),
+                cancelled: false,
+                error: Some(format!("cannot use the backup folder: {err}")),
+            };
+            let _ = events.send(Event::Finished(summary.clone()));
+            return summary;
+        }
+    };
     let notices = events.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
         let _ = notices.send(Event::Notice { notice });
@@ -387,10 +414,14 @@ async fn run_from(
         events: &events,
         query: filter.search_query(me),
         matcher,
+        backup,
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
     for (index, target) in targets.iter().enumerate() {
+        if job.resume().is_some_and(|r| r.is_finished(target.id)) {
+            continue;
+        }
         job.emit(Event::TargetStarted {
             index,
             target_id: target.id,
@@ -402,6 +433,7 @@ async fn run_from(
             Source::Package(package) => job.purge_known(target, package, &mut stats).await,
         };
         total.add(stats);
+        let complete = result.is_ok();
         match result {
             Ok(()) => {}
             Err(err @ (Error::Unauthorized | Error::Cancelled)) => stopped_by = Some(err),
@@ -413,6 +445,7 @@ async fn run_from(
         job.emit(Event::TargetFinished {
             target_id: target.id,
             stats,
+            complete,
         });
         if stopped_by.is_some() {
             break;
@@ -440,9 +473,19 @@ struct Job<'a> {
     events: &'a mpsc::UnboundedSender<Event>,
     query: SearchQuery,
     matcher: Matcher,
+    backup: Option<Backup>,
 }
 
 impl Job<'_> {
+    fn resume(&self) -> Option<&Checkpoint> {
+        self.options.resume.as_ref()
+    }
+
+    /// Dealt with by the run being continued.
+    fn already_done(&self, id: Snowflake) -> bool {
+        self.resume().is_some_and(|r| r.done.contains(&id))
+    }
+
     fn emit(&self, event: Event) {
         // The receiver only goes away when nobody watches the job any more.
         let _ = self.events.send(event);
@@ -456,8 +499,17 @@ impl Job<'_> {
         let scope = target.scope();
         let mut seen = HashSet::new();
         let mut searched = false;
-        for _ in 0..self.options.max_rounds.max(1) {
-            let mut cursor = self.query.max_id;
+        // A continued run starts below the oldest message it dealt with;
+        // later rounds start from the top again, as always.
+        let resume_cursor = self
+            .resume()
+            .and_then(|r| r.cursors.get(&target.id))
+            .copied();
+        for round in 0..self.options.max_rounds.max(1) {
+            let mut cursor = match (round, resume_cursor) {
+                (0, Some(resume)) => Some(self.query.max_id.map_or(resume, |max| max.min(resume))),
+                _ => self.query.max_id,
+            };
             let mut new_messages = 0;
             loop {
                 if searched {
@@ -486,7 +538,7 @@ impl Job<'_> {
                     break;
                 };
                 for message in hits {
-                    if seen.insert(message.id) {
+                    if seen.insert(message.id) && !self.already_done(message.id) {
                         new_messages += 1;
                         self.handle(target, message, stats).await?;
                     }
@@ -521,7 +573,7 @@ impl Job<'_> {
                 let messages: Vec<Message> = channel
                     .messages
                     .iter()
-                    .filter(|m| self.filter.contains(m.id))
+                    .filter(|m| self.filter.contains(m.id) && !self.already_done(m.id))
                     .map(|m| m.to_message(channel.id, self.me))
                     .filter(|m| self.matcher.matches(m))
                     .collect();
@@ -605,9 +657,34 @@ impl Job<'_> {
             self.skipped(target, &message, reason);
             return Ok(());
         }
+        // Attachments are saved first; without a copy the message stays.
+        let saved = match &self.backup {
+            Some(backup) if !message.attachments.is_empty() => {
+                self.control.checkpoint().await?;
+                match self
+                    .control
+                    .guard(backup.save(self.client, &message))
+                    .await?
+                {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        stats.failed += 1;
+                        self.emit(Event::Failed {
+                            target_id: target.id,
+                            message_id: message.id,
+                            error: format!(
+                                "kept, because its attachments could not be backed up: {error}"
+                            ),
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
         if self.options.dry_run {
             stats.deleted += 1;
-            self.deleted(target, &message, true);
+            self.deleted(target, &message, true, saved);
             return Ok(());
         }
 
@@ -639,7 +716,7 @@ impl Job<'_> {
         match delete::classify(result)? {
             Outcome::Deleted | Outcome::AlreadyGone => {
                 stats.deleted += 1;
-                self.deleted(target, &message, false);
+                self.deleted(target, &message, false, saved);
             }
             Outcome::Skipped(reason) => {
                 stats.skipped += 1;
@@ -657,7 +734,7 @@ impl Job<'_> {
         self.control.sleep(self.options.delete_delay_ms).await
     }
 
-    fn deleted(&self, target: &Target, message: &Message, dry_run: bool) {
+    fn deleted(&self, target: &Target, message: &Message, dry_run: bool, saved: Vec<String>) {
         self.emit(Event::Deleted {
             target_id: target.id,
             channel_id: message.channel_id,
@@ -670,6 +747,7 @@ impl Job<'_> {
                 .iter()
                 .filter_map(|a| a["url"].as_str().map(str::to_owned))
                 .collect(),
+            saved,
             dry_run,
         });
     }

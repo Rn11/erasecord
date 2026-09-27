@@ -1,5 +1,6 @@
 <script lang="ts">
   import { SvelteSet, type SvelteMap } from "svelte/reactivity";
+  import { open } from "@tauri-apps/plugin-dialog";
   import {
     HAS_KINDS,
     contentProblem,
@@ -12,6 +13,7 @@
     type RangeForm,
   } from "$lib/format";
   import { num, t } from "$lib/i18n.svelte";
+  import { loadPresets, savePresets, snapshot, withPreset, type Preset } from "$lib/presets";
   import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
   import Avatar from "./Avatar.svelte";
 
@@ -22,6 +24,7 @@
     importError,
     onImport,
     onClosePackage,
+    onStats,
     loading,
     error,
     selected,
@@ -47,6 +50,7 @@
     importError: string | null;
     onImport: (folder: boolean) => void;
     onClosePackage: () => void;
+    onStats: () => void;
     loading: boolean;
     error: string | null;
     selected: SvelteSet<string>;
@@ -111,6 +115,71 @@
     for (const id of expanded) if (!channelLists.has(id)) onLoadChannels(id);
   });
 
+  async function chooseBackupFolder(event?: Event) {
+    const checkbox = event?.currentTarget as HTMLInputElement | undefined;
+    if (checkbox && !checkbox.checked) {
+      options.backup_dir = null;
+      return;
+    }
+    let folder: string | string[] | null = null;
+    try {
+      folder = await open({ directory: true, multiple: false, title: t("setup.backupPick") });
+    } catch {
+      folder = null;
+    }
+    if (typeof folder === "string") options.backup_dir = folder;
+    else if (checkbox) checkbox.checked = options.backup_dir !== null;
+  }
+
+  let presets = $state<Preset[]>(loadPresets());
+  let preset = $state("");
+  /** The name being typed while saving a preset; null when not saving. */
+  let presetName = $state<string | null>(null);
+  let presetNote = $state<string | null>(null);
+
+  function applyPreset() {
+    const chosen = presets.find((p) => p.name === preset);
+    presetNote = null;
+    if (!chosen) return;
+    const settings = $state.snapshot(chosen.settings);
+    range = settings.range;
+    content = settings.content;
+    skipPinned = settings.skipPinned;
+    options = { ...settings.options, dry_run: options.dry_run };
+    if (chosen.targets.length === 0) return;
+    const known = new Set(targets.map((t) => t.id));
+    selected.clear();
+    channelPicks.clear();
+    for (const id of chosen.targets) if (known.has(id)) selected.add(id);
+    for (const [id, channels] of Object.entries(chosen.channels))
+      if (selected.has(id) && channels.length > 0) channelPicks.set(id, [...channels]);
+    const missing = chosen.targets.length - selected.size;
+    if (missing > 0) presetNote = t("presets.missing", { count: missing });
+  }
+
+  function storePreset(event: SubmitEvent) {
+    event.preventDefault();
+    const name = presetName?.trim();
+    if (!name) return;
+    presets = withPreset(presets, {
+      name,
+      settings: snapshot($state.snapshot(range), $state.snapshot(content), skipPinned, $state.snapshot(options)),
+      targets: [...selected],
+      channels: Object.fromEntries([...channelPicks].filter(([id]) => selected.has(id))),
+    });
+    savePresets(presets);
+    preset = presets.find((p) => p.name.toLocaleLowerCase() === name.toLocaleLowerCase())?.name ?? "";
+    presetName = null;
+    presetNote = null;
+  }
+
+  function deletePreset() {
+    presets = presets.filter((p) => p.name !== preset);
+    savePresets(presets);
+    preset = "";
+    presetNote = null;
+  }
+
   function toggleExpanded(id: string) {
     if (expanded.has(id)) expanded.delete(id);
     else {
@@ -168,7 +237,10 @@
             places: t("count.place", { count: pkg.targets.length }),
           })}
         </span>
-        <button class="link" onclick={onClosePackage}>{t("setup.backToLive")}</button>
+        <span class="import">
+          <button class="link" onclick={onStats}>{t("setup.stats")}</button>
+          <button class="link" onclick={onClosePackage}>{t("setup.backToLive")}</button>
+        </span>
       {:else if importing}
         <span class="muted"><span class="spinner"></span> {t("setup.readingPackage")}</span>
       {:else}
@@ -314,6 +386,40 @@
   <section class="card options" aria-label={t("setup.whatToDelete")}>
     <h2>{t("setup.whatToDelete")}</h2>
 
+    <div class="presets small">
+      {#if presetName === null}
+        <div class="preset-row">
+          <select aria-label={t("presets.label")} bind:value={preset} onchange={applyPreset}>
+            <option value="">{presets.length ? t("presets.choose") : t("presets.none")}</option>
+            {#each presets as p (p.name)}<option value={p.name}>{p.name}</option>{/each}
+          </select>
+          <button type="button" class="link small" onclick={() => (presetName = preset)} title={t("presets.hint")}>
+            {t("presets.save")}
+          </button>
+          {#if preset}
+            <button type="button" class="link small" onclick={deletePreset}>{t("presets.delete")}</button>
+          {/if}
+        </div>
+      {:else}
+        <form class="preset-row" onsubmit={storePreset}>
+          <!-- svelte-ignore a11y_autofocus -->
+          <input
+            type="text"
+            maxlength="60"
+            autofocus
+            aria-label={t("presets.name")}
+            placeholder={t("presets.name")}
+            bind:value={presetName}
+            onkeydown={(e) => e.key === "Escape" && (presetName = null)}
+          />
+          <button type="submit" class="btn small" disabled={!presetName.trim()}>{t("presets.store")}</button>
+          <button type="button" class="link small" onclick={() => (presetName = null)}>{t("common.cancel")}</button>
+        </form>
+        <span class="muted">{t("presets.hint")}</span>
+      {/if}
+      {#if presetNote}<span class="muted">{presetNote}</span>{/if}
+    </div>
+
     <fieldset>
       <legend>{t("setup.timeRange")}</legend>
       <label class="choice">
@@ -426,6 +532,19 @@
             aria-label={t("setup.overwriteLabel")}
           />
           <span class="small muted">{t("setup.overwriteHint")}</span>
+        </div>
+      {/if}
+      <label class="choice">
+        <input type="checkbox" checked={options.backup_dir !== null} onchange={chooseBackupFolder} />
+        <span>{t("setup.backup")}</span>
+      </label>
+      {#if options.backup_dir !== null}
+        <div class="indent field">
+          <span class="folder">
+            <code title={options.backup_dir}>{options.backup_dir}</code>
+            <button type="button" class="link small" onclick={() => chooseBackupFolder()}>{t("setup.backupChange")}</button>
+          </span>
+          <span class="small muted">{t("setup.backupHint")}</span>
         </div>
       {/if}
     </fieldset>
@@ -712,6 +831,25 @@
     overflow-y: auto;
   }
 
+  .presets {
+    display: grid;
+    gap: 6px;
+    margin-top: -8px;
+  }
+
+  .preset-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .preset-row select,
+  .preset-row input {
+    flex: 1 1 140px;
+    min-width: 0;
+  }
+
   fieldset {
     border: none;
     padding: 0;
@@ -857,6 +995,27 @@
 
   .problem {
     color: var(--danger);
+  }
+
+  .folder {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .folder code {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 6px;
   }
 
   .summary {

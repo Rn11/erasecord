@@ -3,6 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  Statistics,
   CommandError,
   Filter,
   Friend,
@@ -11,6 +12,7 @@ import type {
   JobOptions,
   LoginResult,
   PackageSummary,
+  UnfinishedRun,
   PreviewEntry,
   Target,
   User,
@@ -30,11 +32,16 @@ export const api = {
     invoke<void>("start_job", { targets, filter, options }),
   importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
   closePackage: () => invoke<void>("close_package"),
+  /** Minutes east of UTC, e.g. 120 for UTC+2. */
+  packageStats: (utcOffsetMinutes: number) => invoke<Statistics>("package_stats", { utcOffsetMinutes }),
   previewPackage: (targets: Target[], filter: Filter) =>
     invoke<PreviewEntry[]>("preview_package", { targets, filter }),
   startPackageJob: (targets: Target[], filter: Filter, options: JobOptions) =>
     invoke<void>("start_package_job", { targets, filter, options }),
   exportRun: (path: string) => invoke<number>("export_run", { path }),
+  unfinishedRun: () => invoke<UnfinishedRun | null>("unfinished_run"),
+  resumeRun: () => invoke<UnfinishedRun>("resume_run"),
+  discardRun: () => invoke<void>("discard_run"),
   pauseJob: () => invoke<void>("pause_job"),
   resumeJob: () => invoke<void>("resume_job"),
   cancelJob: () => invoke<void>("cancel_job"),

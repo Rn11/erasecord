@@ -132,6 +132,11 @@ impl Client {
         })
     }
 
+    /// The API server this client talks to.
+    pub fn api_base(&self) -> &str {
+        &self.inner.config.api_base
+    }
+
     /// Where to report waits and retries; `None` stops reporting.
     pub fn set_notice_sink(&self, sink: Option<NoticeSink>) {
         *self.inner.notices.write().unwrap() = sink;
@@ -186,6 +191,31 @@ impl Client {
 
     pub async fn channel(&self, channel_id: Snowflake) -> Result<Channel> {
         self.get(&format!("/channels/{channel_id}"), &[]).await
+    }
+
+    /// Fresh links for attachment URLs, which Discord signs for a limited
+    /// time. Returns the refreshed URLs in the same order; a URL Discord
+    /// does not refresh is returned unchanged.
+    pub async fn refresh_attachment_urls(&self, urls: &[String]) -> Result<Vec<String>> {
+        let body = serde_json::json!({ "attachment_urls": urls });
+        let response = self
+            .send(Method::POST, "/attachments/refresh-urls", &[], Some(&body))
+            .await?;
+        let answer: Value = serde_json::from_slice(&response.bytes().await?)?;
+        let refreshed = answer["refreshed_urls"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        Ok(urls
+            .iter()
+            .map(|url| {
+                refreshed
+                    .iter()
+                    .find(|r| r["original"].as_str() == Some(url.as_str()))
+                    .and_then(|r| r["refreshed"].as_str())
+                    .map_or_else(|| url.clone(), str::to_owned)
+            })
+            .collect())
     }
 
     /// The IDs of all pinned messages in a channel, page by page. Falls back

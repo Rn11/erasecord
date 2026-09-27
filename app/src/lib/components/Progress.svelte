@@ -35,8 +35,12 @@
   const completed = $derived(finished && !run.summary?.cancelled && !run.summary?.error);
   const fraction = $derived(completed ? 1 : run.expected > 0 ? Math.min(handled / run.expected, 1) : 0);
   const elapsed = $derived(activeMs(run, now));
+  // Only this session's work tells how fast it goes.
+  const handledNow = $derived(handled - processed(run.prior));
   const remaining = $derived(
-    !finished && !paused && handled >= 5 && run.expected > handled ? (elapsed / handled) * (run.expected - handled) : null,
+    !finished && !paused && handledNow >= 5 && run.expected > handled
+      ? (elapsed / handledNow) * (run.expected - handled)
+      : null,
   );
   const title = $derived.by(() => {
     if (run.summary?.error) return t("progress.error");

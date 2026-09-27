@@ -41,10 +41,12 @@ struct Row<'a> {
     status: &'static str,
     content: &'a str,
     attachments: &'a [String],
+    /// Paths of the backed-up attachments, relative to the backup folder.
+    saved_files: &'a [String],
 }
 
 const CSV_HEADER: &str =
-    "place,place_id,channel_id,message_id,sent_at,status,content,attachments\r\n";
+    "place,place_id,channel_id,message_id,sent_at,status,content,attachments,saved_files\r\n";
 
 /// Writes [`Event::Deleted`] events as they arrive; other events only supply
 /// the names of servers and DMs. Call [`ExportWriter::finish`] at the end.
@@ -88,6 +90,7 @@ impl<W: Write> ExportWriter<W> {
                 sent_at,
                 content,
                 attachments,
+                saved,
                 dry_run,
                 ..
             } => {
@@ -101,6 +104,7 @@ impl<W: Write> ExportWriter<W> {
                     status: if *dry_run { "would_delete" } else { "deleted" },
                     content,
                     attachments,
+                    saved_files: saved,
                 };
                 self.write_row(&row)?;
                 self.rows += 1;
@@ -114,6 +118,7 @@ impl<W: Write> ExportWriter<W> {
         match self.format {
             ExportFormat::Csv => {
                 let attachments = row.attachments.join(" ");
+                let saved = row.saved_files.join(" ");
                 let cells = [
                     row.place,
                     &row.place_id,
@@ -123,6 +128,7 @@ impl<W: Write> ExportWriter<W> {
                     row.status,
                     row.content,
                     &attachments,
+                    &saved,
                 ];
                 let line: Vec<String> = cells.iter().map(|c| csv_cell(c)).collect();
                 write!(self.out, "{}\r\n", line.join(","))?;
@@ -176,6 +182,7 @@ mod tests {
             preview: String::new(),
             content: content.into(),
             attachments: vec!["https://cdn/a.png".into(), "https://cdn/b.txt".into()],
+            saved: vec!["attachments/11/1_1_a.png".into()],
             dry_run,
         }
     }
@@ -204,7 +211,7 @@ mod tests {
         assert_eq!(lines[0], format!("\u{feff}{}", CSV_HEADER.trim_end()));
         assert_eq!(
             lines[1],
-            "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt"
+            "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt,attachments/11/1_1_a.png"
         );
         assert!(lines[2].contains(",would_delete,'=1+1,"));
     }

@@ -37,6 +37,10 @@ export interface RunState {
   finishedAt: number | null;
   summary: Summary | null;
   log: LogLine[];
+  /** Totals of the run this one continues, if any. */
+  prior: Stats;
+  /** The expected total is unknown up front and grows with each estimate. */
+  growExpected: boolean;
 }
 
 const MAX_LOG_LINES = 500;
@@ -44,12 +48,27 @@ let nextLogId = 0;
 
 const noStats = (): Stats => ({ deleted: 0, skipped: 0, failed: 0 });
 
-export function newRun(targets: Target[], expected: number, dryRun: boolean): RunState {
+/** What a continued run already did. */
+export interface ResumeFrom {
+  finished: string[];
+  stats: Stats;
+}
+
+export function newRun(targets: Target[], expected: number, dryRun: boolean, resume?: ResumeFrom): RunState {
+  const prior = resume ? { ...resume.stats } : noStats();
   return {
     dryRun,
-    targets: targets.map((target) => ({ target, status: "pending", estimate: null, stats: noStats(), error: null })),
-    expected,
-    totals: noStats(),
+    targets: targets.map((target) => ({
+      target,
+      status: resume?.finished.includes(target.id) ? "done" : "pending",
+      estimate: null,
+      stats: noStats(),
+      error: null,
+    })),
+    expected: resume ? processed(prior) : expected,
+    totals: { ...prior },
+    prior,
+    growExpected: !!resume,
     currentId: null,
     startedAt: Date.now(),
     pausedAt: null,
@@ -88,6 +107,7 @@ export function applyEvent(run: RunState, event: JobEvent) {
       break;
     case "target_estimate":
       if (progress) progress.estimate = event.total;
+      if (run.growExpected) run.expected += event.total;
       break;
     case "deleted": {
       if (progress) progress.stats.deleted++;
@@ -134,7 +154,11 @@ export function applyEvent(run: RunState, event: JobEvent) {
     case "finished":
       run.summary = { stats: event.stats, cancelled: event.cancelled, error: event.error };
       run.finishedAt = Date.now();
-      run.totals = { ...event.stats };
+      run.totals = {
+        deleted: run.prior.deleted + event.stats.deleted,
+        skipped: run.prior.skipped + event.stats.skipped,
+        failed: run.prior.failed + event.stats.failed,
+      };
       if (run.pausedAt !== null) {
         run.pausedMs += Date.now() - run.pausedAt;
         run.pausedAt = null;

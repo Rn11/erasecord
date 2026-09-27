@@ -85,6 +85,8 @@ export interface JobOptions {
   dry_run: boolean;
   /** Replace the text (empty: random letters) and remove attachments before deleting. */
   overwrite: string | null;
+  /** Folder to save attachments to before deleting; null for no backup. */
+  backup_dir: string | null;
 }
 
 export interface Stats {
@@ -129,17 +131,45 @@ export type JobEvent =
       preview: string;
       content: string;
       attachments: string[];
+      /** Saved attachment files, relative to the backup folder. */
+      saved: string[];
       dry_run: boolean;
     }
   | { type: "skipped"; target_id: Snowflake; message_id: Snowflake; reason: SkipReason }
   | { type: "failed"; target_id: Snowflake; message_id: Snowflake; error: string }
   | { type: "target_failed"; target_id: Snowflake; error: string }
   | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
-  | { type: "target_finished"; target_id: Snowflake; stats: Stats }
+  | { type: "target_finished"; target_id: Snowflake; stats: Stats; complete: boolean }
   | { type: "notice"; notice: Notice }
   | ({ type: "finished" } & Summary);
 
 export interface CommandError {
   kind: "unauthorized" | "cancelled" | "busy" | "not_logged_in" | "no_package" | "other";
   message: string;
+}
+
+/** A clean-up that was stopped or cut short and can be continued. */
+export interface UnfinishedRun {
+  targets: Target[];
+  finished: Snowflake[];
+  stats: Stats;
+  from_package: boolean;
+}
+
+/** Statistics about the messages in the imported data package. */
+export interface Statistics {
+  messages: number;
+  with_attachments: number;
+  attachments: number;
+  without_text: number;
+  words: number;
+  characters: number;
+  first_message: string | null;
+  last_message: string | null;
+  /** Every month from the first message to the last, `YYYY-MM`. */
+  months: { month: string; messages: number }[];
+  /** Messages by weekday (Monday first) and hour, local time. */
+  week: number[][];
+  busiest_day: { date: string; messages: number } | null;
+  active_days: number;
 }

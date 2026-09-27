@@ -6,17 +6,17 @@
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
   import { errorMessage } from "$lib/errors";
-  import { applyDocumentLanguage, t } from "$lib/i18n.svelte";
+  import { applyDocumentLanguage, num, t } from "$lib/i18n.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import {
     contentProblem,
     displayName,
-    emptyContent,
     rangeProblem,
     toFilter,
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
+  import { loadLast, saveLast, snapshot } from "$lib/presets";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type {
     Filter,
@@ -26,6 +26,7 @@
     PackageSummary,
     PreviewEntry,
     Target,
+    UnfinishedRun,
     User,
   } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -33,8 +34,9 @@
   import Preview from "$lib/components/Preview.svelte";
   import Progress from "$lib/components/Progress.svelte";
   import Setup from "$lib/components/Setup.svelte";
+  import Stats from "$lib/components/Stats.svelte";
 
-  type Screen = "starting" | "login" | "setup" | "preview" | "progress";
+  type Screen = "starting" | "login" | "setup" | "preview" | "progress" | "stats";
 
   let screen = $state<Screen>("starting");
   let user = $state<User | null>(null);
@@ -57,10 +59,12 @@
   let friendsLoading = $state(false);
   let friendsError = $state<string | null>(null);
   const opening = new SvelteSet<string>();
-  let range = $state<RangeForm>({ mode: "older_than", amount: 30, unit: "days", from: "", to: "" });
-  let content = $state<ContentForm>(emptyContent());
-  let skipPinned = $state(true);
-  let options = $state<JobOptions>({ delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, dry_run: false, overwrite: null });
+  // The settings used last time.
+  const last = loadLast();
+  let range = $state<RangeForm>(last.range);
+  let content = $state<ContentForm>(last.content);
+  let skipPinned = $state(last.skipPinned);
+  let options = $state<JobOptions>({ ...last.options, dry_run: false });
 
   // Fixed when counting starts, so the deletion uses exactly what was counted.
   let filter = $state<Filter>(toFilter({ mode: "all", amount: 1, unit: "days", from: "", to: "" }, true));
@@ -70,6 +74,8 @@
   let previewError = $state<string | null>(null);
 
   let run = $state<RunState | null>(null);
+  /** A clean-up that was stopped or cut short and can be continued. */
+  let unfinished = $state<UnfinishedRun | null>(null);
 
   const shownTargets = $derived(pkg ? pkg.targets.map((t) => t.target) : targets);
   const selectedTargets = $derived(
@@ -121,7 +127,37 @@
     user = loggedIn;
     notice = rememberError ? t("page.rememberFailed", { error: rememberError }) : null;
     screen = "setup";
-    await loadTargets();
+    await Promise.all([loadTargets(), checkUnfinished()]);
+  }
+
+  async function checkUnfinished() {
+    try {
+      unfinished = await api.unfinishedRun();
+    } catch {
+      unfinished = null;
+    }
+  }
+
+  async function continueRun() {
+    if (!unfinished) return;
+    const from = $state.snapshot(unfinished);
+    unfinished = null;
+    run = newRun(from.targets, 0, false, { finished: from.finished, stats: from.stats });
+    screen = "progress";
+    try {
+      await api.resumeRun();
+    } catch (err) {
+      const message = fail(err);
+      if (message && run) {
+        run.summary = { stats: run.totals, cancelled: false, error: message };
+        run.finishedAt = Date.now();
+      }
+    }
+  }
+
+  async function discardRun() {
+    await api.discardRun();
+    unfinished = null;
   }
 
   async function loadTargets() {
@@ -256,6 +292,7 @@
   async function count() {
     if (selectedTargets.length === 0 || rangeProblem(range) || contentProblem(content)) return;
     filter = toFilter(range, skipPinned, content);
+    saveLast(snapshot($state.snapshot(range), $state.snapshot(content), skipPinned, $state.snapshot(options)));
     previewTargets = selectedTargets;
     entries = [];
     previewError = null;
@@ -275,6 +312,8 @@
 
   async function start(dryRun: boolean) {
     // Places without matches need no work; failed searches get another try.
+    // A new real run replaces the unfinished one.
+    if (!dryRun) unfinished = null;
     const runTargets = entries.filter((e) => e.count !== 0).map((e) => e.target);
     const expected = entries.reduce((sum, e) => sum + (e.count ?? 0), 0);
     run = newRun($state.snapshot(runTargets), expected, dryRun);
@@ -308,7 +347,7 @@
   async function finish() {
     run = null;
     screen = "setup";
-    await loadTargets();
+    await Promise.all([loadTargets(), checkUnfinished()]);
   }
 </script>
 
@@ -331,6 +370,23 @@
   {/if}
 
   <main class:padded={screen !== "login" && screen !== "starting"}>
+    {#if screen === "setup" && unfinished}
+      <div class="callout warn small notice resume">
+        <span>
+          <strong>{t("resume.title")}</strong>
+          {t("resume.detail", {
+            messages: t("count.message", { count: unfinished.stats.deleted }),
+            left: num(unfinished.targets.length - unfinished.finished.length),
+            total: num(unfinished.targets.length),
+          })}
+          <span class="muted">{t("resume.hint")}</span>
+        </span>
+        <span class="resume-actions">
+          <button class="btn small" onclick={discardRun}>{t("resume.discard")}</button>
+          <button class="btn primary small" onclick={continueRun}>{t("resume.continue")}</button>
+        </span>
+      </div>
+    {/if}
     {#if notice && user}
       <div class="callout info small notice">
         <span>{notice}</span>
@@ -350,6 +406,7 @@
         {importError}
         onImport={importPackage}
         onClosePackage={closePackage}
+        onStats={() => (screen = "stats")}
         loading={targetsLoading}
         error={targetsError}
         {selected}
@@ -381,6 +438,8 @@
         onCancel={() => api.cancelJob()}
         onStart={start}
       />
+    {:else if screen === "stats" && pkg}
+      <Stats {pkg} onBack={() => (screen = "setup")} />
     {:else if screen === "progress" && run}
       <Progress {run} onPause={pause} onResume={resume} onStop={() => api.cancelJob()} onDone={finish} />
     {/if}
@@ -444,6 +503,12 @@
     justify-content: space-between;
     gap: 8px;
     flex: none !important;
+  }
+
+  .resume-actions {
+    display: flex;
+    gap: 6px;
+    flex: none;
   }
 
   .starting {

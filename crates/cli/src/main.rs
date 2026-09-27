@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
-    ExportWriter, Has, Notice, Package, PackageTarget, Snowflake, Target, TargetKind,
+    ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -72,6 +72,26 @@ enum Command {
         content: Content,
         #[command(flatten)]
         options: DeleteOptions,
+    },
+    /// Statistics about the messages in your Discord data package: when and where you
+    /// wrote. Needs no token.
+    Stats {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// Print JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Continue a clean-up that was started with `delete --state FILE` and did not
+    /// finish, with exactly the servers, DMs and conditions it had.
+    Resume {
+        /// The state file given to `delete --state`.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Print every deleted or skipped message.
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -153,6 +173,15 @@ struct DeleteOptions {
     /// with its text and attachment links, to FILE: JSON for a .json file, CSV otherwise.
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
+    /// Before deleting a message, save its attachments into DIR (a message whose files
+    /// cannot be saved is kept), together with messages-<time>.json listing all messages.
+    /// With --dry-run this only backs up.
+    #[arg(long, value_name = "DIR")]
+    backup: Option<PathBuf>,
+    /// Keep track of the progress in FILE, so that a run that is stopped or cut short can be
+    /// continued with `erasecord resume FILE`. The file is removed once everything is done.
+    #[arg(long, value_name = "FILE")]
+    state: Option<PathBuf>,
     /// Pause after each deletion, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = JobOptions::default().delete_delay_ms)]
     delete_delay: u64,
@@ -187,14 +216,18 @@ impl Command {
             Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
                 selection.package.as_deref()
             }
-            Command::Channels { .. } => None,
+            Command::Stats { package, .. } => Some(package),
+            Command::Channels { .. } | Command::Resume { .. } => None,
         }
     }
 
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
-            Command::List { .. } | Command::Channels { .. } => return Ok(()),
+            Command::List { .. }
+            | Command::Channels { .. }
+            | Command::Resume { .. }
+            | Command::Stats { .. } => return Ok(()),
             Command::Preview {
                 selection,
                 range,
@@ -205,7 +238,12 @@ impl Command {
                 range,
                 content,
                 options,
-            } => (selection, range, content, !options.dry_run && !options.yes),
+            } => {
+                if options.state.is_some() && options.dry_run {
+                    bail!("--state is for real runs; a dry run has nothing to continue");
+                }
+                (selection, range, content, !options.dry_run && !options.yes)
+            }
         };
         if selection.targets.is_empty()
             && selection.channels.is_empty()
@@ -247,8 +285,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         None => None,
     };
     // Reading the package and counting in it needs no Discord account.
-    let offline =
-        package.is_some() && matches!(cli.command, Command::List { .. } | Command::Preview { .. });
+    let offline = package.is_some()
+        && matches!(
+            cli.command,
+            Command::List { .. } | Command::Preview { .. } | Command::Stats { .. }
+        );
     let session = if offline {
         None
     } else {
@@ -269,6 +310,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
+        Command::Stats { json, .. } => {
+            let package = package.expect("package loaded");
+            let offset = chrono::Local::now().offset().local_minus_utc() / 60;
+            let stats = erasecord_core::stats::Statistics::of(&package, offset);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                print_stats(&stats, &package.targets());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::List { json, friends, .. } => {
             if let Some(package) = &package {
                 let targets = package.targets();
@@ -369,6 +421,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 search_delay_ms: options.search_delay,
                 dry_run: options.dry_run,
                 overwrite: options.overwrite.clone(),
+                backup_dir: options.backup.clone(),
                 ..Default::default()
             };
             if !options.dry_run && !options.yes {
@@ -385,18 +438,67 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 }
             }
+            let state = match &options.state {
+                Some(file) => {
+                    // Absolute, so `resume` works from any folder.
+                    let package_path = match &selection.package {
+                        Some(path) => Some(std::fs::canonicalize(path)?),
+                        None => None,
+                    };
+                    let saved =
+                        SavedRun::new(&targets, &filter, &job_options, package_path.as_deref());
+                    Some((file.clone(), saved))
+                }
+                None => None,
+            };
             graceful.store(true, Ordering::SeqCst);
-            delete(
+            delete(Plan {
                 client,
                 me,
                 package,
                 targets,
                 filter,
-                job_options,
+                options: job_options,
                 control,
-                options.verbose,
-                options.export.as_deref(),
-            )
+                verbose: options.verbose,
+                export: options.export,
+                state,
+            })
+            .await
+        }
+        Command::Resume { file, verbose } => {
+            let (client, me) = online();
+            let saved = SavedRun::load(&file)
+                .with_context(|| format!("cannot read the state file {}", file.display()))?;
+            let package = match &saved.package {
+                Some(path) => {
+                    let package = load_package(path)?;
+                    package
+                        .check_owner(me)
+                        .context("cannot use this data package")?;
+                    Some(Arc::new(package))
+                }
+                None => None,
+            };
+            eprintln!(
+                "Continuing: {} of {} server(s)/DM(s) left, {} message(s) deleted so far.",
+                saved.remaining(),
+                saved.targets.len(),
+                saved.checkpoint.stats.deleted
+            );
+            graceful.store(true, Ordering::SeqCst);
+            delete(Plan {
+                client,
+                me,
+                package,
+                targets: saved.targets.clone(),
+                filter: saved.filter.clone(),
+                options: saved.resume_options(),
+                control,
+                verbose,
+                export: None,
+                state: Some((file, saved)),
+            })
             .await
         }
     }
@@ -642,7 +744,8 @@ fn confirm(total: u64) -> Result<bool> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn delete(
+/// A clean-up to run.
+struct Plan {
     client: Client,
     me: Snowflake,
     package: Option<Arc<Package>>,
@@ -651,18 +754,50 @@ async fn delete(
     options: JobOptions,
     control: JobControl,
     verbose: bool,
-    export: Option<&Path>,
-) -> Result<ExitCode> {
+    export: Option<PathBuf>,
+    /// Where to keep track of the progress, and what is known so far.
+    state: Option<(PathBuf, SavedRun)>,
+}
+
+/// How often the state file is written, in events.
+const STATE_SAVE_EVERY: u32 = 20;
+
+async fn delete(plan: Plan) -> Result<ExitCode> {
+    let Plan {
+        client,
+        me,
+        package,
+        targets,
+        filter,
+        options,
+        control,
+        verbose,
+        export,
+        mut state,
+    } = plan;
+    let export = export.as_deref();
+    if let Some((file, saved)) = &state {
+        saved
+            .save(file)
+            .with_context(|| format!("cannot write the state file {}", file.display()))?;
+    }
     // Created before anything is deleted, so a bad path costs nothing.
-    let mut exporter = match export {
-        Some(path) => {
-            let file = std::fs::File::create(path)
-                .with_context(|| format!("cannot create {}", path.display()))?;
-            let writer = io::BufWriter::new(file);
-            Some(ExportWriter::new(writer, ExportFormat::for_path(path))?)
+    let backup_list = match &options.backup_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+            let stamp = Local::now().format("%Y%m%d-%H%M%S");
+            Some(dir.join(format!("messages-{stamp}.json")))
         }
         None => None,
     };
+    let mut exporters = Vec::new();
+    for path in export.into_iter().chain(backup_list.as_deref()) {
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        let writer = ExportWriter::new(io::BufWriter::new(file), ExportFormat::for_path(path))?;
+        exporters.push((path.to_owned(), writer));
+    }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let dry_run = options.dry_run;
     let target_count = targets.len();
@@ -679,20 +814,31 @@ async fn delete(
     });
 
     let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);
+    let mut unsaved = 0;
     while let Some(event) = rx.recv().await {
         progress.handle(&event);
-        if let Some(exporter) = exporter.as_mut() {
+        if let Some((file, saved)) = &mut state {
+            saved.checkpoint.observe(&event);
+            unsaved += 1;
+            if unsaved >= STATE_SAVE_EVERY {
+                unsaved = 0;
+                saved
+                    .save(file)
+                    .with_context(|| format!("cannot write the state file {}", file.display()))?;
+            }
+        }
+        for (path, exporter) in &mut exporters {
             exporter
                 .observe(&event)
-                .context("could not write the export file")?;
+                .with_context(|| format!("could not write {}", path.display()))?;
         }
     }
     let summary = task.await?;
-    if let (Some(exporter), Some(path)) = (exporter, export) {
+    for (path, exporter) in exporters {
         let rows = exporter.rows();
         exporter
             .finish()
-            .context("could not write the export file")?;
+            .with_context(|| format!("could not write {}", path.display()))?;
         println!("Saved {rows} message(s) to {}.", path.display());
     }
 
@@ -700,6 +846,18 @@ async fn delete(
         "Done: {} {}, {} skipped, {} failed.",
         summary.stats.deleted, progress.deleted_label, summary.stats.skipped, summary.stats.failed
     );
+    if let Some((file, saved)) = &state {
+        let complete = summary.error.is_none() && !summary.cancelled;
+        if complete {
+            let _ = std::fs::remove_file(file);
+            println!("Everything is done; removed {}.", file.display());
+        } else {
+            saved
+                .save(file)
+                .with_context(|| format!("cannot write the state file {}", file.display()))?;
+            println!("To continue later: erasecord resume {}", file.display());
+        }
+    }
     if let Some(error) = summary.error {
         bail!("stopped early: {error}");
     }
@@ -892,6 +1050,75 @@ fn parse_age(input: &str) -> Option<Result<DateTime<Utc>, String>> {
         _ => return None,
     };
     Some(time.ok_or_else(|| format!("{input} is too far in the past")))
+}
+
+fn print_stats(stats: &erasecord_core::stats::Statistics, places: &[PackageTarget]) {
+    let day = |t: Option<chrono::DateTime<chrono::Utc>>| {
+        t.map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_default()
+    };
+    println!(
+        "Messages      {} on {} days, {} to {}",
+        stats.messages,
+        stats.active_days,
+        day(stats.first_message),
+        day(stats.last_message)
+    );
+    println!(
+        "Words         {} ({} messages without text)",
+        stats.words, stats.without_text
+    );
+    println!(
+        "Attachments   {} in {} messages",
+        stats.attachments, stats.with_attachments
+    );
+    if let Some(busiest) = &stats.busiest_day {
+        println!(
+            "Busiest day   {} ({} messages)",
+            busiest.date, busiest.messages
+        );
+    }
+    let hours: Vec<u64> = (0..24)
+        .map(|h| stats.week.iter().map(|d| d[h]).sum())
+        .collect();
+    if let Some((hour, _)) = hours.iter().enumerate().max_by_key(|(_, n)| **n) {
+        println!(
+            "Busiest hour  {hour:02}:00-{:02}:00 (local time)",
+            (hour + 1) % 24
+        );
+    }
+    let mut years: Vec<(&str, u64)> = Vec::new();
+    for month in &stats.months {
+        let year = &month.month[..4];
+        match years.last_mut() {
+            Some((y, n)) if *y == year => *n += month.messages,
+            _ => years.push((year, month.messages)),
+        }
+    }
+    if !years.is_empty() {
+        println!("\nPer year");
+        let max = years.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
+        for (year, n) in years {
+            let bar = "#".repeat(((n * 40).div_ceil(max)) as usize);
+            println!("  {year}  {n:>7}  {bar}");
+        }
+    }
+    let mut top: Vec<&PackageTarget> = places.iter().collect();
+    top.sort_by_key(|p| std::cmp::Reverse(p.messages));
+    if !top.is_empty() {
+        println!("\nWhere you write most");
+        for place in top.iter().take(10) {
+            println!("  {:>7}  {}", place.messages, place.target.name);
+        }
+        if top.len() > 10 {
+            let rest: u64 = top[10..].iter().map(|p| p.messages).sum();
+            println!("  {rest:>7}  {} other places", top.len() - 10);
+        }
+    }
 }
 
 #[cfg(test)]
