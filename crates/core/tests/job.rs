@@ -42,6 +42,19 @@ async fn run_job(
     filter: Filter,
     options: JobOptions,
 ) -> (Summary, Vec<Event>) {
+    run_job_within(fake, targets, filter, options, 10).await
+}
+
+/// Like [`run_job`], with more time: sealing an encrypted backup derives
+/// its key twice with scrypt, which is slow on purpose (and slower still on
+/// a busy CI machine).
+async fn run_job_within(
+    fake: &FakeDiscord,
+    targets: &[Target],
+    filter: Filter,
+    options: JobOptions,
+    seconds: u64,
+) -> (Summary, Vec<Event>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (client, control) = (fake.client(), JobControl::new());
     let run = job::run(
@@ -53,7 +66,7 @@ async fn run_job(
         &control,
         tx,
     );
-    let summary = tokio::time::timeout(Duration::from_secs(10), run)
+    let summary = tokio::time::timeout(Duration::from_secs(seconds), run)
         .await
         .expect("job did not finish");
     let mut events = Vec::new();
@@ -1067,7 +1080,8 @@ async fn an_encrypted_backup_becomes_one_archive() {
     let dir = tempfile::tempdir().unwrap();
     let options = encrypted_options(dir.path(), "correct horse battery staple");
 
-    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+    let (summary, events) =
+        run_job_within(&fake, &[dm_target()], Filter::default(), options, 120).await;
 
     assert_eq!((summary.stats.deleted, summary.stats.failed), (33, 0));
     assert!(fake.remaining().is_empty());
@@ -1139,7 +1153,7 @@ async fn a_stopped_encrypted_backup_is_finished_by_continuing() {
     // The first part is sealed after 25 messages; stop in the second.
     wait_until("the first part was deleted", || fake.delete_calls() >= 26).await;
     control.cancel();
-    let summary = tokio::time::timeout(Duration::from_secs(10), task)
+    let summary = tokio::time::timeout(Duration::from_secs(60), task)
         .await
         .unwrap()
         .unwrap();
@@ -1160,7 +1174,8 @@ async fn a_stopped_encrypted_backup_is_finished_by_continuing() {
         delete_delay_ms: 0,
         ..options
     };
-    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+    let (summary, events) =
+        run_job_within(&fake, &[dm_target()], Filter::default(), options, 120).await;
     assert!(summary.error.is_none(), "{:?}", summary.error);
     assert!(fake.remaining().is_empty());
     let files = events.iter().find_map(|e| match e {
