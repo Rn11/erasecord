@@ -117,6 +117,11 @@ export const en = {
   "setup.overwriteLabel": "Replacement text",
   "setup.overwriteHint":
     "Each message is edited to this text and loses its attachments, then deleted. Takes about twice as long.",
+  "setup.backup": "Back up attachments before deleting",
+  "setup.backupChange": "Change…",
+  "setup.backupPick": "Choose a folder for the backup",
+  "setup.backupHint":
+    "Images and files are saved to this folder first, together with a list of all messages. A message whose files cannot be saved is kept. A dry run only backs up and deletes nothing.",
   "setup.speed": "Speed",
   "setup.deleteDelay": "Pause after each deletion",
   "setup.searchDelay": "Pause between searches",

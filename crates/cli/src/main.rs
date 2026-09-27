@@ -153,6 +153,11 @@ struct DeleteOptions {
     /// with its text and attachment links, to FILE: JSON for a .json file, CSV otherwise.
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
+    /// Before deleting a message, save its attachments into DIR (a message whose files
+    /// cannot be saved is kept), together with messages-<time>.json listing all messages.
+    /// With --dry-run this only backs up.
+    #[arg(long, value_name = "DIR")]
+    backup: Option<PathBuf>,
     /// Pause after each deletion, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = JobOptions::default().delete_delay_ms)]
     delete_delay: u64,
@@ -369,6 +374,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 search_delay_ms: options.search_delay,
                 dry_run: options.dry_run,
                 overwrite: options.overwrite.clone(),
+                backup_dir: options.backup.clone(),
                 ..Default::default()
             };
             if !options.dry_run && !options.yes {
@@ -654,15 +660,22 @@ async fn delete(
     export: Option<&Path>,
 ) -> Result<ExitCode> {
     // Created before anything is deleted, so a bad path costs nothing.
-    let mut exporter = match export {
-        Some(path) => {
-            let file = std::fs::File::create(path)
-                .with_context(|| format!("cannot create {}", path.display()))?;
-            let writer = io::BufWriter::new(file);
-            Some(ExportWriter::new(writer, ExportFormat::for_path(path))?)
+    let backup_list = match &options.backup_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("cannot create {}", dir.display()))?;
+            let stamp = Local::now().format("%Y%m%d-%H%M%S");
+            Some(dir.join(format!("messages-{stamp}.json")))
         }
         None => None,
     };
+    let mut exporters = Vec::new();
+    for path in export.into_iter().chain(backup_list.as_deref()) {
+        let file = std::fs::File::create(path)
+            .with_context(|| format!("cannot create {}", path.display()))?;
+        let writer = ExportWriter::new(io::BufWriter::new(file), ExportFormat::for_path(path))?;
+        exporters.push((path.to_owned(), writer));
+    }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let dry_run = options.dry_run;
     let target_count = targets.len();
@@ -681,18 +694,18 @@ async fn delete(
     let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);
     while let Some(event) = rx.recv().await {
         progress.handle(&event);
-        if let Some(exporter) = exporter.as_mut() {
+        for (path, exporter) in &mut exporters {
             exporter
                 .observe(&event)
-                .context("could not write the export file")?;
+                .with_context(|| format!("could not write {}", path.display()))?;
         }
     }
     let summary = task.await?;
-    if let (Some(exporter), Some(path)) = (exporter, export) {
+    for (path, exporter) in exporters {
         let rows = exporter.rows();
         exporter
             .finish()
-            .context("could not write the export file")?;
+            .with_context(|| format!("could not write {}", path.display()))?;
         println!("Saved {rows} message(s) to {}.", path.display());
     }
 

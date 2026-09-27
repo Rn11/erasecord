@@ -773,3 +773,101 @@ async fn keeps_every_pin_of_a_channel_with_many() {
         assert_eq!(fake.remaining().len(), if legacy_pins { 121 } else { 120 });
     }
 }
+
+fn saved_files(events: &[Event]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Deleted { saved, .. } => Some(saved.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn backs_up_attachments_before_deleting() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into(), "notes.txt".into()],
+        ..FakeMessage::in_dm(0, 0)
+    };
+    // Its link has expired and has to be refreshed first.
+    let old = FakeMessage {
+        files: vec!["expired-dog.png".into()],
+        ..FakeMessage::in_dm(1, 0)
+    };
+    let text = FakeMessage::in_dm(2, 0);
+    let fake =
+        FakeDiscord::start(State::with_messages(vec![photo.clone(), old.clone(), text])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        ..fast()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.failed), (3, 0));
+    assert!(fake.remaining().is_empty());
+    let read = |relative: &str| std::fs::read_to_string(dir.path().join(relative)).unwrap();
+    let cat = format!("attachments/{DM_CHANNEL}/{}_1_cat.png", photo.id);
+    let notes = format!("attachments/{DM_CHANNEL}/{}_2_notes.txt", photo.id);
+    let dog = format!("attachments/{DM_CHANNEL}/{}_1_expired-dog.png", old.id);
+    assert_eq!(read(&cat), "contents of cat.png");
+    assert_eq!(read(&notes), "contents of notes.txt");
+    assert_eq!(read(&dog), "contents of expired-dog.png");
+    // Newest first; the text message has nothing to save.
+    assert_eq!(saved_files(&events), [vec![], vec![dog], vec![cat, notes]]);
+    assert_eq!(fake.state.lock().unwrap().refreshed.len(), 1);
+}
+
+#[tokio::test]
+async fn keeps_messages_whose_attachments_cannot_be_saved() {
+    let gone = FakeMessage {
+        files: vec!["missing-video.mp4".into()],
+        ..FakeMessage::in_dm(0, 0)
+    };
+    let fine = FakeMessage {
+        files: vec!["ok.png".into()],
+        ..FakeMessage::in_dm(1, 0)
+    };
+    let fake = FakeDiscord::start(State::with_messages(vec![gone.clone(), fine])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        ..fast()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.failed), (1, 1));
+    assert_eq!(fake.remaining(), vec![gone.id]);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Failed { message_id, error, .. }
+            if message_id.0 == gone.id && error.contains("could not be backed up")
+    )));
+}
+
+#[tokio::test]
+async fn dry_run_with_a_backup_only_saves() {
+    let photo = FakeMessage {
+        files: vec!["cat.png".into()],
+        ..FakeMessage::in_dm(0, 0)
+    };
+    let fake = FakeDiscord::start(State::with_messages(vec![photo.clone()])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        dry_run: true,
+        ..fast()
+    };
+
+    let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(fake.delete_calls(), 0);
+    let saved = dir
+        .path()
+        .join(format!("attachments/{DM_CHANNEL}/{}_1_cat.png", photo.id));
+    assert!(saved.exists());
+}

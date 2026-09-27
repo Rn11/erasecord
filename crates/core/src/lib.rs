@@ -5,6 +5,7 @@
 //! Everything here is independent of the user interface; the CLI and the
 //! desktop app are thin layers on top.
 
+pub mod backup;
 pub mod client;
 pub mod delete;
 pub mod error;

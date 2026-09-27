@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
+use crate::backup::Backup;
 use crate::client::{Client, Notice};
 use crate::delete::{self, Outcome, SkipReason};
 use crate::error::{Error, Result};
@@ -38,6 +40,10 @@ pub struct JobOptions {
     /// attachments, so the original is gone even where Discord keeps deleted
     /// messages around. An empty text means random letters.
     pub overwrite: Option<String>,
+    /// Before deleting a message, save its attachments into this folder. A
+    /// message whose attachments cannot be saved is not deleted. Also done in
+    /// a dry run, which then backs up without deleting anything.
+    pub backup_dir: Option<PathBuf>,
 }
 
 impl Default for JobOptions {
@@ -48,6 +54,7 @@ impl Default for JobOptions {
             max_rounds: 3,
             dry_run: false,
             overwrite: None,
+            backup_dir: None,
         }
     }
 }
@@ -108,6 +115,8 @@ pub enum Event {
         content: String,
         /// Attachment URLs, for exports.
         attachments: Vec<String>,
+        /// Where the attachments were saved, relative to the backup folder.
+        saved: Vec<String>,
         dry_run: bool,
     },
     Skipped {
@@ -373,6 +382,18 @@ async fn run_from(
             return summary;
         }
     };
+    let backup = match options.backup_dir.as_deref().map(Backup::new).transpose() {
+        Ok(backup) => backup,
+        Err(err) => {
+            let summary = Summary {
+                stats: Stats::default(),
+                cancelled: false,
+                error: Some(format!("cannot use the backup folder: {err}")),
+            };
+            let _ = events.send(Event::Finished(summary.clone()));
+            return summary;
+        }
+    };
     let notices = events.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
         let _ = notices.send(Event::Notice { notice });
@@ -387,6 +408,7 @@ async fn run_from(
         events: &events,
         query: filter.search_query(me),
         matcher,
+        backup,
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
@@ -440,6 +462,7 @@ struct Job<'a> {
     events: &'a mpsc::UnboundedSender<Event>,
     query: SearchQuery,
     matcher: Matcher,
+    backup: Option<Backup>,
 }
 
 impl Job<'_> {
@@ -605,9 +628,34 @@ impl Job<'_> {
             self.skipped(target, &message, reason);
             return Ok(());
         }
+        // Attachments are saved first; without a copy the message stays.
+        let saved = match &self.backup {
+            Some(backup) if !message.attachments.is_empty() => {
+                self.control.checkpoint().await?;
+                match self
+                    .control
+                    .guard(backup.save(self.client, &message))
+                    .await?
+                {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        stats.failed += 1;
+                        self.emit(Event::Failed {
+                            target_id: target.id,
+                            message_id: message.id,
+                            error: format!(
+                                "kept, because its attachments could not be backed up: {error}"
+                            ),
+                        });
+                        return Ok(());
+                    }
+                }
+            }
+            _ => Vec::new(),
+        };
         if self.options.dry_run {
             stats.deleted += 1;
-            self.deleted(target, &message, true);
+            self.deleted(target, &message, true, saved);
             return Ok(());
         }
 
@@ -639,7 +687,7 @@ impl Job<'_> {
         match delete::classify(result)? {
             Outcome::Deleted | Outcome::AlreadyGone => {
                 stats.deleted += 1;
-                self.deleted(target, &message, false);
+                self.deleted(target, &message, false, saved);
             }
             Outcome::Skipped(reason) => {
                 stats.skipped += 1;
@@ -657,7 +705,7 @@ impl Job<'_> {
         self.control.sleep(self.options.delete_delay_ms).await
     }
 
-    fn deleted(&self, target: &Target, message: &Message, dry_run: bool) {
+    fn deleted(&self, target: &Target, message: &Message, dry_run: bool, saved: Vec<String>) {
         self.emit(Event::Deleted {
             target_id: target.id,
             channel_id: message.channel_id,
@@ -670,6 +718,7 @@ impl Job<'_> {
                 .iter()
                 .filter_map(|a| a["url"].as_str().map(str::to_owned))
                 .collect(),
+            saved,
             dry_run,
         });
     }

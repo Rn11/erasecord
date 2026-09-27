@@ -1,5 +1,6 @@
 <script lang="ts">
   import { SvelteSet, type SvelteMap } from "svelte/reactivity";
+  import { open } from "@tauri-apps/plugin-dialog";
   import {
     HAS_KINDS,
     contentProblem,
@@ -110,6 +111,22 @@
   $effect(() => {
     for (const id of expanded) if (!channelLists.has(id)) onLoadChannels(id);
   });
+
+  async function chooseBackupFolder(event?: Event) {
+    const checkbox = event?.currentTarget as HTMLInputElement | undefined;
+    if (checkbox && !checkbox.checked) {
+      options.backup_dir = null;
+      return;
+    }
+    let folder: string | string[] | null = null;
+    try {
+      folder = await open({ directory: true, multiple: false, title: t("setup.backupPick") });
+    } catch {
+      folder = null;
+    }
+    if (typeof folder === "string") options.backup_dir = folder;
+    else if (checkbox) checkbox.checked = options.backup_dir !== null;
+  }
 
   function toggleExpanded(id: string) {
     if (expanded.has(id)) expanded.delete(id);
@@ -426,6 +443,19 @@
             aria-label={t("setup.overwriteLabel")}
           />
           <span class="small muted">{t("setup.overwriteHint")}</span>
+        </div>
+      {/if}
+      <label class="choice">
+        <input type="checkbox" checked={options.backup_dir !== null} onchange={chooseBackupFolder} />
+        <span>{t("setup.backup")}</span>
+      </label>
+      {#if options.backup_dir !== null}
+        <div class="indent field">
+          <span class="folder">
+            <code title={options.backup_dir}>{options.backup_dir}</code>
+            <button type="button" class="link small" onclick={() => chooseBackupFolder()}>{t("setup.backupChange")}</button>
+          </span>
+          <span class="small muted">{t("setup.backupHint")}</span>
         </div>
       {/if}
     </fieldset>
@@ -857,6 +887,27 @@
 
   .problem {
     color: var(--danger);
+  }
+
+  .folder {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .folder code {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 6px;
   }
 
   .summary {

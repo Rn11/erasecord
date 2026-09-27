@@ -148,6 +148,7 @@ async function simulate(selected: Target[], filter: Filter, dryRun: boolean, ove
           preview: samples[i % samples.length],
           content: samples[i % samples.length],
           attachments: [],
+          saved: [],
           dry_run: dryRun,
         });
       }
@@ -219,7 +220,7 @@ export function installMockBackend() {
           await sleep(200);
           return 42;
         case "plugin:dialog|open":
-          return "/home/demo/Downloads/package.zip";
+          return args.options?.directory ? "/home/demo/EraseCord backup" : "/home/demo/Downloads/package.zip";
         case "import_package":
           await sleep(800);
           return fakePackage();

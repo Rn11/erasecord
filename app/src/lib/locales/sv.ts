@@ -115,6 +115,11 @@ export const sv: Dictionary = {
   "setup.overwriteLabel": "Ersättningstext",
   "setup.overwriteHint":
     "Varje meddelande ändras till den här texten och förlorar sina bilagor, och raderas sedan. Tar ungefär dubbelt så lång tid.",
+  "setup.backup": "Säkerhetskopiera bilagor innan de raderas",
+  "setup.backupChange": "Ändra…",
+  "setup.backupPick": "Välj en mapp för säkerhetskopian",
+  "setup.backupHint":
+    "Bilder och filer sparas först i den här mappen, tillsammans med en lista över alla meddelanden. Ett meddelande vars filer inte kan sparas behålls. En testkörning säkerhetskopierar bara och raderar ingenting.",
   "setup.speed": "Hastighet",
   "setup.deleteDelay": "Paus efter varje radering",
   "setup.searchDelay": "Paus mellan sökningar",

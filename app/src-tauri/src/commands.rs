@@ -246,6 +246,16 @@ fn spawn_job(
     options: JobOptions,
 ) -> CommandResult<()> {
     let session = state.session()?;
+    // The list of messages next to the backed-up files; created before the
+    // run, so a folder that cannot be written stops it before anything is
+    // deleted.
+    let mut backup_list =
+        match &options.backup_dir {
+            Some(dir) => Some(backup_list(dir).map_err(|err| {
+                CommandError::other(format!("cannot use the backup folder: {err}"))
+            })?),
+            None => None,
+        };
     let control = state.begin_job()?;
     state.clear_last_run();
     tauri::async_runtime::spawn(async move {
@@ -265,6 +275,17 @@ fn spawn_job(
         let forward = async {
             while let Some(event) = rx.recv().await {
                 app.state::<AppState>().record(&event);
+                if let Some(list) = backup_list.as_mut() {
+                    // A broken list must not stop the run; the files are saved.
+                    if list.observe(&event).is_err() {
+                        backup_list = None;
+                    }
+                }
+                if matches!(event, Event::Finished(_)) {
+                    if let Some(list) = backup_list.take() {
+                        let _ = list.finish();
+                    }
+                }
                 if matches!(event, Event::Finished(_)) {
                     // Free the slot before the UI hears about it, so it can
                     // start the next run right away.
@@ -276,6 +297,16 @@ fn spawn_job(
         tokio::join!(run, forward);
     });
     Ok(())
+}
+
+type ListWriter = ExportWriter<std::io::BufWriter<std::fs::File>>;
+
+/// `messages-<time>.json` in the backup folder.
+fn backup_list(dir: &std::path::Path) -> std::io::Result<ListWriter> {
+    std::fs::create_dir_all(dir)?;
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let file = std::fs::File::create(dir.join(format!("messages-{stamp}.json")))?;
+    ExportWriter::new(std::io::BufWriter::new(file), ExportFormat::Json)
 }
 
 /// Saves what the last clean-up deleted (or would delete) to `path`: JSON

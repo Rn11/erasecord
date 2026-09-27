@@ -116,6 +116,11 @@ export const de: Dictionary = {
   "setup.overwriteLabel": "Ersatztext",
   "setup.overwriteHint":
     "Jede Nachricht wird auf diesen Text geändert, verliert ihre Anhänge und wird dann gelöscht. Dauert etwa doppelt so lange.",
+  "setup.backup": "Anhänge vor dem Löschen sichern",
+  "setup.backupChange": "Ändern…",
+  "setup.backupPick": "Ordner für die Sicherung wählen",
+  "setup.backupHint":
+    "Bilder und Dateien werden zuerst in diesem Ordner gespeichert, zusammen mit einer Liste aller Nachrichten. Eine Nachricht, deren Dateien sich nicht speichern lassen, wird behalten. Ein Probelauf sichert nur und löscht nichts.",
   "setup.speed": "Geschwindigkeit",
   "setup.deleteDelay": "Pause nach jeder Löschung",
   "setup.searchDelay": "Pause zwischen Suchen",

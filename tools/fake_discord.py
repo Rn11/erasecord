@@ -42,6 +42,9 @@ CLOSED_DMS = {"4004": ["2004"]}
 # A channel only the data package remembers.
 GONE_CHANNEL = "3999"
 
+# Where attachments are served; set in main() once the port is known.
+FILES_BASE = "http://127.0.0.1:8765/files"
+
 lock = threading.Lock()
 messages = {}  # id -> message dict (plus "_guild")
 counters = {"deletes": 0}
@@ -73,7 +76,7 @@ def seed(rng):
         if rng.random() < 0.08:
             name = rng.choice(["cat.png", "clip.mp4", "notes.txt", "voice-message.ogg"])
             attachments.append({"id": message_id, "filename": name,
-                                "url": f"https://cdn.discordapp.com/attachments/{channel_id}/{message_id}/{name}"})
+                                "url": f"{FILES_BASE}/{message_id}/{name}"})
         messages[message_id] = {
             "id": message_id,
             "channel_id": channel_id,
@@ -173,6 +176,16 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_GET(self):
+        # Attachments, like Discord's file servers: no token needed.
+        match = re.fullmatch(r"/files/(\d+)/([^/]+)", urlparse(self.path).path)
+        if match:
+            data = f"contents of {match.group(2)}".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if not self.authorized():
             return
         url = urlparse(self.path)
@@ -243,6 +256,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
+        if urlparse(self.path).path == "/api/v9/attachments/refresh-urls":
+            urls = self.body().get("attachment_urls", [])
+            return self.reply(200, {"refreshed_urls": [{"original": u, "refreshed": u} for u in urls]})
         if urlparse(self.path).path != "/api/v9/users/@me/channels":
             return self.reply(404, {"message": "404: Not Found", "code": 0})
         recipient = self.body().get("recipient_id")
@@ -295,6 +311,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--write-package", metavar="PATH", help="also write a data package of your messages")
     args = parser.parse_args()
+    global FILES_BASE
+    FILES_BASE = f"http://127.0.0.1:{args.port}/files"
     seed(random.Random(args.seed))
     mine = sum(1 for m in messages.values() if m["author"]["id"] == ME)
     if args.write_package:

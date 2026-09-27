@@ -115,6 +115,11 @@ export const es: Dictionary = {
   "setup.overwriteLabel": "Texto de reemplazo",
   "setup.overwriteHint":
     "Cada mensaje se cambia a este texto y pierde sus archivos adjuntos; después se borra. Tarda aproximadamente el doble.",
+  "setup.backup": "Hacer copia de los archivos adjuntos antes de borrar",
+  "setup.backupChange": "Cambiar…",
+  "setup.backupPick": "Elige una carpeta para la copia",
+  "setup.backupHint":
+    "Las imágenes y los archivos se guardan primero en esta carpeta, junto con una lista de todos los mensajes. Un mensaje cuyos archivos no se puedan guardar se conserva. Una prueba solo hace la copia y no borra nada.",
   "setup.speed": "Velocidad",
   "setup.deleteDelay": "Pausa tras cada borrado",
   "setup.searchDelay": "Pausa entre búsquedas",

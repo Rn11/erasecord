@@ -86,6 +86,10 @@ pub struct State {
     pub ignore_channel_filter: bool,
     /// Only the old, unpaged pins endpoint exists (at most 50 pins).
     pub legacy_pins: bool,
+    /// Base URL of the fake file server; set by [`FakeDiscord::start`].
+    pub files_base: String,
+    /// Attachment links sent to the refresh endpoint.
+    pub refreshed: Vec<String>,
     /// Channels that answer 404 Unknown Channel.
     pub gone_channels: Vec<u64>,
     /// Servers whose search answers 403 Missing Access.
@@ -118,7 +122,19 @@ pub struct FakeDiscord {
 impl FakeDiscord {
     pub async fn start(state: State) -> Self {
         let server = MockServer::start().await;
+        let mut state = state;
+        state.files_base = format!("{}/files", server.uri());
         let state = Arc::new(Mutex::new(state));
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/files/\d+/[^/]+$"))
+            .respond_with(FileResponder)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v9/attachments/refresh-urls"))
+            .respond_with(RefreshResponder(state.clone()))
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/api/v9/users/@me"))
             .respond_with(ResponseTemplate::new(200).set_body_json(user_json(ME, "me")))
@@ -225,7 +241,8 @@ pub fn user_json(id: u64, name: &str) -> Value {
     json!({ "id": id.to_string(), "username": name, "global_name": null, "avatar": null })
 }
 
-fn message_json(m: &FakeMessage) -> Value {
+/// `files` is where the fake serves attachments, see [`FileResponder`].
+fn message_json(m: &FakeMessage, files: &str) -> Value {
     json!({
         "id": m.id.to_string(),
         "channel_id": m.channel_id.to_string(),
@@ -233,13 +250,57 @@ fn message_json(m: &FakeMessage) -> Value {
         "content": m.text(),
         "author": user_json(m.author_id, "someone"),
         "pinned": m.pinned,
-        "attachments": m.files.iter().map(|f| json!({ "filename": f })).collect::<Vec<_>>(),
+        "attachments": m
+            .files
+            .iter()
+            .map(|f| json!({ "filename": f, "url": format!("{files}/{}/{f}", m.id) }))
+            .collect::<Vec<_>>(),
         "hit": true,
     })
 }
 
 fn error_json(status: u16, code: u64, message: &str) -> ResponseTemplate {
     ResponseTemplate::new(status).set_body_json(json!({ "message": message, "code": code }))
+}
+
+/// Serves "contents of <name>". Names starting with `expired-` only answer
+/// once their link was refreshed (`?fresh=1`); `missing-` never answer.
+struct FileResponder;
+
+impl Respond for FileResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let name = request.url.path().rsplit('/').next().unwrap().to_owned();
+        let fresh = request.url.query().is_some_and(|q| q.contains("fresh=1"));
+        if name.starts_with("missing-") || (name.starts_with("expired-") && !fresh) {
+            return ResponseTemplate::new(404);
+        }
+        ResponseTemplate::new(200).set_body_string(format!("contents of {name}"))
+    }
+}
+
+/// Discord's link refresh: appends `?fresh=1` to every link.
+struct RefreshResponder(Arc<Mutex<State>>);
+
+impl Respond for RefreshResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        let urls: Vec<String> = body["attachment_urls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|u| u.as_str().unwrap().to_owned())
+            .collect();
+        self.0
+            .lock()
+            .unwrap()
+            .refreshed
+            .extend(urls.iter().cloned());
+        let refreshed: Vec<Value> = urls
+            .iter()
+            .map(|u| json!({ "original": u, "refreshed": format!("{u}?fresh=1") }))
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({ "refreshed_urls": refreshed }))
+    }
 }
 
 struct SearchResponder(Arc<Mutex<State>>);
@@ -301,7 +362,7 @@ impl Respond for SearchResponder {
         let page: Vec<Value> = found
             .iter()
             .take(25)
-            .map(|m| json!([message_json(m)]))
+            .map(|m| json!([message_json(m, &state.files_base)]))
             .collect();
         ResponseTemplate::new(200).set_body_json(json!({
             "total_results": found.len(),
@@ -388,7 +449,7 @@ impl Respond for PinsResponder {
             .iter()
             .filter(|m| m.channel_id == id && m.pinned)
             .take(50)
-            .map(message_json)
+            .map(|m| message_json(m, &state.files_base))
             .collect();
         ResponseTemplate::new(200).set_body_json(pins)
     }
@@ -428,7 +489,7 @@ impl Respond for PagedPinsResponder {
         let items: Vec<Value> = rest
             .iter()
             .take(limit)
-            .map(|m| json!({ "pinned_at": pinned_at(m), "message": message_json(m) }))
+            .map(|m| json!({ "pinned_at": pinned_at(m), "message": message_json(m, &state.files_base) }))
             .collect();
         ResponseTemplate::new(200)
             .set_body_json(json!({ "items": items, "has_more": rest.len() > limit }))
@@ -452,7 +513,7 @@ impl Respond for EditResponder {
         let body: Value = serde_json::from_slice(&request.body).unwrap();
         state.edits.push((message_id, body));
         match state.messages.iter().find(|m| m.id == message_id) {
-            Some(m) => ResponseTemplate::new(200).set_body_json(message_json(m)),
+            Some(m) => ResponseTemplate::new(200).set_body_json(message_json(m, &state.files_base)),
             None => error_json(404, 10008, "Unknown Message"),
         }
     }

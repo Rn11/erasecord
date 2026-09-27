@@ -1242,6 +1242,7 @@ dependencies = [
 name = "erasecord-app"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "erasecord-core",
  "keyring",
  "serde",

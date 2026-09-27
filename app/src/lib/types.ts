@@ -85,6 +85,8 @@ export interface JobOptions {
   dry_run: boolean;
   /** Replace the text (empty: random letters) and remove attachments before deleting. */
   overwrite: string | null;
+  /** Folder to save attachments to before deleting; null for no backup. */
+  backup_dir: string | null;
 }
 
 export interface Stats {
@@ -129,6 +131,8 @@ export type JobEvent =
       preview: string;
       content: string;
       attachments: string[];
+      /** Saved attachment files, relative to the backup folder. */
+      saved: string[];
       dry_run: boolean;
     }
   | { type: "skipped"; target_id: Snowflake; message_id: Snowflake; reason: SkipReason }
