@@ -152,6 +152,9 @@ struct ScopeArgs {
     /// Only this server or DM (ID from `erasecord list --package`); repeat for several.
     #[arg(long = "place", value_name = "ID")]
     places: Vec<u64>,
+    /// Only this channel of a server; repeat for several.
+    #[arg(long = "channel", value_name = "ID")]
+    channels: Vec<u64>,
 }
 
 impl ScopeArgs {
@@ -160,7 +163,7 @@ impl ScopeArgs {
             from: self.from,
             to: self.to,
             places: self.places.iter().copied().map(Snowflake).collect(),
-            channels: Vec::new(),
+            channels: self.channels.iter().copied().map(Snowflake).collect(),
         }
     }
 }

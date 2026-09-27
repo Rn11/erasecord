@@ -6,8 +6,16 @@
   import LanguagePicker from "./LanguagePicker.svelte";
   import type { User } from "$lib/types";
 
-  let { notice = null, onLogin }: { notice?: string | null; onLogin: (user: User, rememberError: string | null) => void } =
-    $props();
+  let {
+    notice = null,
+    onLogin,
+    onInsights,
+  }: {
+    notice?: string | null;
+    onLogin: (user: User, rememberError: string | null) => void;
+    /** Opens Insights without logging in. */
+    onInsights?: () => void;
+  } = $props();
 
   let token = $state("");
   let remember = $state(false);
@@ -98,6 +106,13 @@
       <button type="button" class="btn small" onclick={() => openUrl("https://discord.com/app")}>{t("login.openDiscord")}</button>
       <p class="muted">{t("login.helpNote")}</p>
     </details>
+
+    {#if onInsights}
+      <div class="insights-link small">
+        <span class="muted">{t("login.orInsights")}</span>
+        <button type="button" class="btn small" onclick={onInsights}>{t("login.insights")}</button>
+      </div>
+    {/if}
   </form>
 </div>
 
@@ -107,6 +122,16 @@
     display: grid;
     place-items: center;
     padding: 32px 16px;
+  }
+
+  .insights-link {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
 
   .login {

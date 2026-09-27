@@ -156,20 +156,3 @@ export interface UnfinishedRun {
   from_package: boolean;
 }
 
-/** Statistics about the messages in the imported data package. */
-export interface Statistics {
-  messages: number;
-  with_attachments: number;
-  attachments: number;
-  without_text: number;
-  words: number;
-  characters: number;
-  first_message: string | null;
-  last_message: string | null;
-  /** Every month from the first message to the last, `YYYY-MM`. */
-  months: { month: string; messages: number }[];
-  /** Messages by weekday (Monday first) and hour, local time. */
-  week: number[][];
-  busiest_day: { date: string; messages: number } | null;
-  active_days: number;
-}

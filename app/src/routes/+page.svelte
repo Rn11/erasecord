@@ -34,11 +34,16 @@
   import Preview from "$lib/components/Preview.svelte";
   import Progress from "$lib/components/Progress.svelte";
   import Setup from "$lib/components/Setup.svelte";
-  import Stats from "$lib/components/Stats.svelte";
+  import Insights from "$lib/components/insights/Insights.svelte";
+  import { resetInsights } from "$lib/insights/store.svelte";
 
-  type Screen = "starting" | "login" | "setup" | "preview" | "progress" | "stats";
+  type Screen = "starting" | "login" | "setup" | "preview" | "progress";
 
   let screen = $state<Screen>("starting");
+  /** The two parts of the app; Insights also works without logging in. */
+  let tab = $state<"cleanup" | "insights">("cleanup");
+  /** Using Insights without an account. */
+  let offline = $state(false);
   let user = $state<User | null>(null);
   let notice = $state<string | null>(null);
 
@@ -125,6 +130,7 @@
 
   async function enter(loggedIn: User, rememberError: string | null = null) {
     user = loggedIn;
+    offline = false;
     notice = rememberError ? t("page.rememberFailed", { error: rememberError }) : null;
     screen = "setup";
     await Promise.all([loadTargets(), checkUnfinished()]);
@@ -263,6 +269,7 @@
       const known = (h: string) => h !== "embed" && h !== "sticker";
       content.has = content.has.filter(known);
       content.without = content.without.filter(known);
+      resetInsights();
       pkg = summary;
     } catch (err) {
       importError = fail(err);
@@ -274,7 +281,18 @@
   async function closePackage() {
     await api.closePackage();
     pkg = null;
+    resetInsights();
     clearSelection();
+  }
+
+  function openInsightsOffline() {
+    offline = true;
+    tab = "insights";
+  }
+
+  function showLogin() {
+    tab = "cleanup";
+    screen = "login";
   }
 
   async function logout() {
@@ -284,8 +302,11 @@
     clearSelection();
     friends = null;
     pkg = null;
+    resetInsights();
     run = null;
     notice = null;
+    offline = false;
+    tab = "cleanup";
     screen = "login";
   }
 
@@ -352,25 +373,37 @@
 </script>
 
 <div class="app">
-  {#if user}
+  {#if user || offline}
     <header class="topbar">
       <span class="brand">EraseCord</span>
+      <nav class="tabs" aria-label={t("nav.label")}>
+        <button class:active={tab === "cleanup"} aria-current={tab === "cleanup" ? "page" : undefined} onclick={() => (tab = "cleanup")}>
+          {t("nav.cleanup")}
+        </button>
+        <button class:active={tab === "insights"} aria-current={tab === "insights" ? "page" : undefined} onclick={() => (tab = "insights")}>
+          {t("nav.insights")}
+        </button>
+      </nav>
       <span class="spacer"></span>
       <LanguagePicker />
-      <span class="user">
-        <Avatar
-          name={displayName(user)}
-          url={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64` : null}
-          size={26}
-        />
-        {displayName(user)}
-      </span>
-      <button class="btn ghost small" onclick={logout} disabled={busy}>{t("common.logOut")}</button>
+      {#if user}
+        <span class="user">
+          <Avatar
+            name={displayName(user)}
+            url={user.avatar ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png?size=64` : null}
+            size={26}
+          />
+          {displayName(user)}
+        </span>
+        <button class="btn ghost small" onclick={logout} disabled={busy}>{t("common.logOut")}</button>
+      {:else}
+        <button class="btn small" onclick={showLogin}>{t("login.submit")}</button>
+      {/if}
     </header>
   {/if}
 
-  <main class:padded={screen !== "login" && screen !== "starting"}>
-    {#if screen === "setup" && unfinished}
+  <main class:padded={tab === "insights" || (screen !== "login" && screen !== "starting")}>
+    {#if tab === "cleanup" && screen === "setup" && unfinished}
       <div class="callout warn small notice resume">
         <span>
           <strong>{t("resume.title")}</strong>
@@ -396,8 +429,10 @@
 
     {#if screen === "starting"}
       <p class="starting muted"><span class="spinner"></span> {t("common.starting")}</p>
-    {:else if screen === "login"}
-      <Login {notice} onLogin={enter} />
+    {:else if tab === "insights" && (user || offline)}
+      <Insights {pkg} {importing} {importError} onImport={importPackage} />
+    {:else if screen === "login" || !user}
+      <Login {notice} onLogin={enter} onInsights={offline ? undefined : openInsightsOffline} />
     {:else if screen === "setup"}
       <Setup
         targets={shownTargets}
@@ -406,7 +441,7 @@
         {importError}
         onImport={importPackage}
         onClosePackage={closePackage}
-        onStats={() => (screen = "stats")}
+        onStats={() => (tab = "insights")}
         loading={targetsLoading}
         error={targetsError}
         {selected}
@@ -438,8 +473,6 @@
         onCancel={() => api.cancelJob()}
         onStart={start}
       />
-    {:else if screen === "stats" && pkg}
-      <Stats {pkg} onBack={() => (screen = "setup")} />
     {:else if screen === "progress" && run}
       <Progress {run} onPause={pause} onResume={resume} onStop={() => api.cancelJob()} onDone={finish} />
     {/if}
@@ -470,6 +503,32 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-left: 12px;
+  }
+
+  .tabs button {
+    border: none;
+    background: none;
+    font: inherit;
+    font-weight: 550;
+    color: var(--muted);
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+  }
+
+  .tabs button:hover {
+    color: var(--text);
+  }
+
+  .tabs button.active {
+    background: var(--accent-soft);
+    color: var(--text);
   }
 
   .user {

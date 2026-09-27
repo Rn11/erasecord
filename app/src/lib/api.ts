@@ -3,7 +3,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
-  Statistics,
+  Info,
+  LinksReport,
+  Overview,
+  PlacesReport,
+  Scope,
+  SearchResult,
+  Timeline,
+  WordsReport,
+} from "./insights/types";
+import type {
   CommandError,
   Filter,
   Friend,
@@ -32,8 +41,14 @@ export const api = {
     invoke<void>("start_job", { targets, filter, options }),
   importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
   closePackage: () => invoke<void>("close_package"),
-  /** Minutes east of UTC, e.g. 120 for UTC+2. */
-  packageStats: (utcOffsetMinutes: number) => invoke<Statistics>("package_stats", { utcOffsetMinutes }),
+  insightsInfo: () => invoke<Info>("insights_info"),
+  insightsOverview: (scope: Scope) => invoke<Overview>("insights_overview", { scope }),
+  insightsTime: (scope: Scope) => invoke<Timeline>("insights_time", { scope }),
+  insightsPlaces: (scope: Scope) => invoke<PlacesReport>("insights_places", { scope }),
+  insightsWords: (scope: Scope) => invoke<WordsReport>("insights_words", { scope }),
+  insightsLinks: (scope: Scope) => invoke<LinksReport>("insights_links", { scope }),
+  insightsSearch: (scope: Scope, query: string, limit: number) =>
+    invoke<SearchResult>("insights_search", { scope, query, limit }),
   previewPackage: (targets: Target[], filter: Filter) =>
     invoke<PreviewEntry[]>("preview_package", { targets, filter }),
   startPackageJob: (targets: Target[], filter: Filter, options: JobOptions) =>

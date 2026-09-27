@@ -4,8 +4,8 @@
 
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import type { Info } from "./insights/types";
 import type {
-  Statistics,
   Filter,
   Friend,
   GuildChannel,
@@ -65,39 +65,35 @@ function fakePackage(): PackageSummary {
   };
 }
 
-function fakeStats(): Statistics {
-  // Deterministic, so screenshots stay the same.
-  let seed = 7;
-  const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
-  const months: Statistics["months"] = [];
-  for (let i = 0; i < 50; i++) {
-    const date = new Date(2022, 7 + i, 1);
-    const wave = 30 + 40 * Math.sin(i / 5) ** 2 + (i > 30 && i < 36 ? 60 : 0);
-    months.push({
-      month: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
-      messages: i === 12 ? 0 : Math.round(wave * (0.6 + random() * 0.8)),
-    });
+// Insights come from the real Rust code: tools/fake_discord.py
+// --insights-package PATH runs the CLI for each query.
+const DEV_INSIGHTS = "http://127.0.0.1:8765/dev/insights";
+
+async function devInsights(body: unknown): Promise<unknown> {
+  const response = await fetch(DEV_INSIGHTS, { method: "POST", body: JSON.stringify(body) });
+  const data = await response.json();
+  if (!response.ok) throw { kind: "other", message: data.message ?? "Insights are not available" };
+  return data;
+}
+
+/** A package summary for the package the dev server analyses, if any. */
+async function devPackage(): Promise<PackageSummary | null> {
+  try {
+    const info = (await devInsights({ section: "info" })) as Info;
+    return {
+      messages: info.messages,
+      left_servers: [],
+      targets: info.places.map((p) => ({
+        target: { kind: p.kind, id: p.id, name: p.name, icon_url: null, channels: [] },
+        messages: p.messages,
+        channels: p.channels.map((c) => ({ id: c.id, name: c.name, messages: 0 })),
+        first_message: info.first_day,
+        last_message: info.last_day,
+      })),
+    };
+  } catch {
+    return null;
   }
-  const week = Array.from({ length: 7 }, (_, day) =>
-    Array.from({ length: 24 }, (_, hour) => {
-      const evening = hour >= 17 && hour <= 23 ? 3 : hour >= 9 && hour < 17 ? 1.3 : hour < 2 ? 1.5 : 0.1;
-      return Math.round(evening * (day >= 5 ? 1.6 : 1) * (4 + random() * 8));
-    }),
-  );
-  return {
-    messages: 2451,
-    with_attachments: 212,
-    attachments: 263,
-    without_text: 97,
-    words: 18_734,
-    characters: 102_947,
-    first_message: "2022-08-03T18:12:00Z",
-    last_message: "2026-09-20T21:40:00Z",
-    months,
-    week,
-    busiest_day: { date: "2025-04-12", messages: 87 },
-    active_days: 611,
-  };
 }
 
 function channelsOf(guildId: string): GuildChannel[] {
@@ -288,12 +284,19 @@ export function installMockBackend() {
           return args.options?.directory ? "/home/demo/EraseCord backup" : "/home/demo/Downloads/package.zip";
         case "import_package":
           await sleep(800);
-          return fakePackage();
+          return (await devPackage()) ?? fakePackage();
         case "close_package":
           return null;
-        case "package_stats":
-          await sleep(300);
-          return fakeStats();
+        case "insights_info":
+          return devInsights({ section: "info" });
+        case "insights_overview":
+        case "insights_time":
+        case "insights_places":
+        case "insights_words":
+        case "insights_links":
+          return devInsights({ section: cmd.slice("insights_".length), scope: args.scope });
+        case "insights_search":
+          return devInsights({ query: args.query, limit: args.limit, scope: args.scope });
         case "preview_package":
           return (args.targets as Target[]).map((target) => {
             const item = fakePackage().targets.find((t) => t.target.id === target.id);
