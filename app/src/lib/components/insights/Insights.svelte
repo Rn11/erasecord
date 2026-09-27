@@ -2,7 +2,9 @@
   import { num, t } from "$lib/i18n.svelte";
   import { insights, loadInfo } from "$lib/insights/store.svelte";
   import type { CleanUpRequest, Section } from "$lib/insights/types";
+  import type { LastPackage } from "$lib/lastPackage";
   import type { PackageSummary } from "$lib/types";
+  import PackageGuide from "../PackageGuide.svelte";
   import LinksView from "./LinksView.svelte";
   import Overview from "./Overview.svelte";
   import PlacesView from "./PlacesView.svelte";
@@ -17,12 +19,18 @@
     importing,
     importError,
     onImport,
+    lastPackage,
+    onReopen,
+    onForget,
     onCleanUp,
   }: {
     pkg: PackageSummary | null;
     importing: boolean;
     importError: string | null;
     onImport: (folder: boolean) => void;
+    lastPackage: LastPackage | null;
+    onReopen: () => void;
+    onForget: () => void;
     /** Opens Clean up with these messages selected. */
     onCleanUp: (request: CleanUpRequest) => void;
   } = $props();
@@ -64,7 +72,16 @@
           </button>
         </div>
       {/if}
+      {#if lastPackage && !importing}
+        <p class="small last">
+          <button class="link" onclick={onReopen}>{t("insights.reopen", { name: lastPackage.name })}</button>
+          <span class="muted">· {t("count.message", { count: lastPackage.messages })}</span>
+          <button class="link muted" onclick={onForget}>{t("insights.forget")}</button>
+        </p>
+      {/if}
+      <p class="muted small">{t("insights.dropHint")}</p>
       {#if importError}<p class="callout error small">{importError}</p>{/if}
+      <PackageGuide open={!lastPackage} />
     </div>
   {:else if insights.infoError}
     <p class="callout error small">{insights.infoError}</p>
@@ -143,6 +160,28 @@
 
   .empty p {
     margin: 0;
+  }
+
+  .last {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .link.muted {
+    color: var(--muted);
+    text-decoration: underline;
   }
 
   .actions {

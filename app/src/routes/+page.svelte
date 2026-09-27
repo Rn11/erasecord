@@ -17,6 +17,7 @@
     type ContentForm,
     type RangeForm,
   } from "$lib/format";
+  import { forgetLastPackage, loadLastPackage, saveLastPackage, type LastPackage } from "$lib/lastPackage";
   import { loadLast, saveLast, snapshot } from "$lib/presets";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type {
@@ -61,6 +62,10 @@
   let pkg = $state<PackageSummary | null>(null);
   let importing = $state(false);
   let importError = $state<string | null>(null);
+  /** The package opened last time, to open again with one click. */
+  let lastPackage = $state<LastPackage | null>(loadLastPackage());
+  /** A file is being dragged over the window. */
+  let dragging = $state(false);
   /** Friends without an open DM; null until asked for. */
   let friends = $state<Friend[] | null>(null);
   let friendsLoading = $state(false);
@@ -97,6 +102,22 @@
     if (import.meta.env.DEV && !isTauri()) {
       const { installMockBackend } = await import("$lib/mock");
       installMockBackend();
+    }
+    if (isTauri()) {
+      // A data package dropped anywhere on the window is imported.
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      unlisten.push(
+        await getCurrentWebview().onDragDropEvent((event) => {
+          const drag = event.payload;
+          if (drag.type === "enter" || drag.type === "over") dragging = user !== null || offline;
+          else if (drag.type === "leave") dragging = false;
+          else if (drag.type === "drop") {
+            dragging = false;
+            const path = drag.paths[0];
+            if (path && (user || offline)) importPackageFrom(path);
+          }
+        }),
+      );
     }
     unlisten.push(
       await onJobEvent((event) => {
@@ -256,7 +277,13 @@
       importError = errorMessage(err);
       return;
     }
-    if (!path) return;
+    if (path) await importPackageFrom(path);
+  }
+
+  /** Reads the package at `path` (a .zip file or a folder). */
+  async function importPackageFrom(path: string) {
+    if (importing || busy) return;
+    importError = null;
     importing = true;
     try {
       const summary = await api.importPackage(path);
@@ -273,6 +300,8 @@
       content.without = content.without.filter(known);
       resetInsights();
       pkg = summary;
+      saveLastPackage(path, summary.messages);
+      lastPackage = loadLastPackage();
     } catch (err) {
       importError = fail(err);
     } finally {
@@ -398,6 +427,11 @@
 </script>
 
 <div class="app">
+  {#if dragging}
+    <div class="drop" aria-hidden="true">
+      <div class="drop-box">{t("page.dropPackage")}</div>
+    </div>
+  {/if}
   {#if user || offline}
     <header class="topbar">
       <span class="brand">EraseCord</span>
@@ -455,7 +489,16 @@
     {#if screen === "starting"}
       <p class="starting muted"><span class="spinner"></span> {t("common.starting")}</p>
     {:else if tab === "insights" && (user || offline)}
-      <Insights {pkg} {importing} {importError} onImport={importPackage} onCleanUp={cleanUpFromInsights} />
+      <Insights
+        {pkg}
+        {importing}
+        {importError}
+        {lastPackage}
+        onImport={importPackage}
+        onReopen={() => lastPackage && importPackageFrom(lastPackage.path)}
+        onForget={() => ((lastPackage = null), forgetLastPackage())}
+        onCleanUp={cleanUpFromInsights}
+      />
     {:else if screen === "login" || !user}
       <Login {notice} onLogin={enter} onInsights={offline ? undefined : openInsightsOffline} />
     {:else if screen === "setup"}
@@ -467,6 +510,9 @@
         onImport={importPackage}
         onClosePackage={closePackage}
         onStats={() => (tab = "insights")}
+        {lastPackage}
+        onReopen={() => lastPackage && importPackageFrom(lastPackage.path)}
+        onGuide={() => (tab = "insights")}
         loading={targetsLoading}
         error={targetsError}
         {selected}
@@ -593,6 +639,25 @@
     display: flex;
     gap: 6px;
     flex: none;
+  }
+
+  .drop {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: grid;
+    place-items: center;
+    background: color-mix(in oklab, var(--bg) 70%, transparent);
+    pointer-events: none;
+  }
+
+  .drop-box {
+    padding: 28px 40px;
+    border: 2px dashed var(--accent);
+    border-radius: var(--radius);
+    background: var(--panel);
+    font-size: 16px;
+    font-weight: 600;
   }
 
   .starting {

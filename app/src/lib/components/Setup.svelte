@@ -15,6 +15,7 @@
   import { num, t } from "$lib/i18n.svelte";
   import { loadPresets, savePresets, snapshot, withPreset, type Preset } from "$lib/presets";
   import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
+  import type { LastPackage } from "$lib/lastPackage";
   import Avatar from "./Avatar.svelte";
 
   let {
@@ -25,6 +26,9 @@
     onImport,
     onClosePackage,
     onStats,
+    lastPackage,
+    onReopen,
+    onGuide,
     loading,
     error,
     selected,
@@ -51,6 +55,9 @@
     onImport: (folder: boolean) => void;
     onClosePackage: () => void;
     onStats: () => void;
+    lastPackage: LastPackage | null;
+    onReopen: () => void;
+    onGuide: () => void;
     loading: boolean;
     error: string | null;
     selected: SvelteSet<string>;
@@ -250,6 +257,11 @@
           <button class="link muted" onclick={() => onImport(true)} title={t("setup.importFolderHint")}>
             {t("setup.importFolder")}
           </button>
+          {#if lastPackage}
+            <button class="link" onclick={onReopen} title={lastPackage.path}>{t("setup.reopen")}</button>
+          {:else}
+            <button class="link muted" onclick={onGuide}>{t("setup.howToGet")}</button>
+          {/if}
         </span>
       {/if}
     </div>
