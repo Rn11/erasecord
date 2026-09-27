@@ -11,6 +11,7 @@ use chrono::{DateTime, Local, Months, NaiveDate, TimeDelta, Utc};
 use clap::{Args, Parser, Subcommand};
 use erasecord_core::insights::Index;
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
+use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot, SecretString};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
     ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target, TargetKind,
@@ -129,12 +130,28 @@ enum Command {
         #[arg(value_name = "OUTPUT")]
         output: PathBuf,
     },
+    /// Decrypt and unpack an encrypted backup (erasecord-backup-….tar.age, or a
+    /// ….parts folder of a backup that was not finished) or an encrypted export.
+    OpenBackup {
+        /// The .tar.age archive, .parts folder or encrypted export.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// The folder to unpack into.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+        /// Read the passphrase from the first line of FILE instead of asking.
+        #[arg(long, value_name = "FILE")]
+        passphrase_file: Option<PathBuf>,
+    },
     /// Continue a clean-up that was started with `delete --state FILE` and did not
     /// finish, with exactly the servers, DMs and conditions it had.
     Resume {
         /// The state file given to `delete --state`.
         #[arg(value_name = "FILE")]
         file: PathBuf,
+        /// Read the passphrase of the encrypted backup from the first line of FILE.
+        #[arg(long, value_name = "PASSFILE")]
+        passphrase_file: Option<PathBuf>,
         /// Print every deleted or skipped message.
         #[arg(short, long)]
         verbose: bool,
@@ -258,13 +275,23 @@ struct DeleteOptions {
     verbose: bool,
     /// Save every deleted message (or, with --dry-run, every message that would be deleted),
     /// with its text and attachment links, to FILE: JSON for a .json file, CSV otherwise.
+    /// Encrypted (FILE.age) unless --no-encrypt.
     #[arg(long, value_name = "FILE")]
     export: Option<PathBuf>,
-    /// Before deleting a message, save its attachments into DIR (a message whose files
-    /// cannot be saved is kept), together with messages-<time>.json listing all messages.
-    /// With --dry-run this only backs up.
+    /// Before deleting a message, save its attachments (a message whose files cannot be saved
+    /// is kept) and the list of messages into one encrypted archive in DIR,
+    /// erasecord-backup-<time>.tar.age; see `erasecord open-backup`. With --no-encrypt,
+    /// plain files and messages-<time>.json instead. With --dry-run this only backs up.
     #[arg(long, value_name = "DIR")]
     backup: Option<PathBuf>,
+    /// Write the backup and --export without encryption. Not recommended: they contain
+    /// your messages.
+    #[arg(long)]
+    no_encrypt: bool,
+    /// Read the passphrase that encrypts the backup and --export from the first line of FILE,
+    /// instead of asking for it.
+    #[arg(long, value_name = "FILE")]
+    passphrase_file: Option<PathBuf>,
     /// Keep track of the progress in FILE, so that a run that is stopped or cut short can be
     /// continued with `erasecord resume FILE`. The file is removed once everything is done.
     #[arg(long, value_name = "FILE")]
@@ -307,6 +334,7 @@ impl Command {
             Command::Channels { .. }
             | Command::Resume { .. }
             | Command::InspectPackage { .. }
+            | Command::OpenBackup { .. }
             | Command::AnonymizePackage { .. } => None,
         }
     }
@@ -320,6 +348,7 @@ impl Command {
             | Command::Stats { .. }
             | Command::Search { .. }
             | Command::InspectPackage { .. }
+            | Command::OpenBackup { .. }
             | Command::AnonymizePackage { .. } => return Ok(()),
             Command::Preview {
                 selection,
@@ -383,6 +412,22 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
+        Command::OpenBackup {
+            path,
+            to,
+            passphrase_file,
+        } => {
+            let passphrase = ask_passphrase(passphrase_file.as_deref(), false)?;
+            eprintln!("Decrypting {}…", path.display());
+            let opened = vault::open(path, &passphrase, to).map_err(anyhow::Error::msg)?;
+            println!(
+                "Unpacked {} file(s) and {} message(s) into {}.",
+                opened.files,
+                opened.messages,
+                opened.folder.display()
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
         Command::AnonymizePackage { package, output } => {
             eprintln!("Reading {}…", package.display());
             let summary = erasecord_core::anonymize::anonymize(package, output)?;
@@ -443,7 +488,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
-        Command::InspectPackage { .. } | Command::AnonymizePackage { .. } => {
+        Command::InspectPackage { .. }
+        | Command::AnonymizePackage { .. }
+        | Command::OpenBackup { .. } => {
             unreachable!("handled before logging in")
         }
         Command::Stats {
@@ -595,7 +642,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 None => select(&client, &selection).await?,
             };
             let filter = build_filter(&range, &content, options.skip_pinned)?;
-            let job_options = JobOptions {
+            let encrypt =
+                !options.no_encrypt && (options.backup.is_some() || options.export.is_some());
+            let mut job_options = JobOptions {
                 delete_delay_ms: options.delete_delay,
                 search_delay_ms: options.search_delay,
                 dry_run: options.dry_run,
@@ -616,6 +665,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     println!("Nothing was deleted.");
                     return Ok(ExitCode::SUCCESS);
                 }
+            }
+            let passphrase = if encrypt {
+                Some(ask_passphrase(options.passphrase_file.as_deref(), true)?)
+            } else {
+                None
+            };
+            if let (Some(dir), Some(passphrase)) = (&options.backup, &passphrase) {
+                let (settings, keys) = EncryptedBackupSettings::create(dir, passphrase.clone())
+                    .with_context(|| format!("cannot create the backup in {}", dir.display()))?;
+                eprintln!(
+                    "The backup is encrypted and becomes {} at the end.",
+                    settings.archive.display()
+                );
+                job_options.backup_encryption = Some(settings);
+                job_options.backup_keys = KeySlot(Some(Arc::new(keys)));
             }
             let state = match &options.state {
                 Some(file) => {
@@ -641,14 +705,26 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 control,
                 verbose: options.verbose,
                 export: options.export,
+                export_passphrase: passphrase,
                 state,
             })
             .await
         }
-        Command::Resume { file, verbose } => {
+        Command::Resume {
+            file,
+            verbose,
+            passphrase_file,
+        } => {
             let (client, me) = online();
             let saved = SavedRun::load(&file)
                 .with_context(|| format!("cannot read the state file {}", file.display()))?;
+            let mut options = saved.resume_options();
+            if let Some(settings) = &saved.options.backup_encryption {
+                eprintln!("The backup of this clean-up is encrypted.");
+                let passphrase = ask_passphrase(passphrase_file.as_deref(), false)?;
+                let keys = settings.unlock(passphrase).map_err(anyhow::Error::msg)?;
+                options.backup_keys = KeySlot(Some(Arc::new(keys)));
+            }
             let package = match &saved.package {
                 Some(path) => {
                     let package = load_package(path)?;
@@ -672,10 +748,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 package,
                 targets: saved.targets.clone(),
                 filter: saved.filter.clone(),
-                options: saved.resume_options(),
+                options,
                 control,
                 verbose,
                 export: None,
+                export_passphrase: None,
                 state: Some((file, saved)),
             })
             .await
@@ -695,6 +772,116 @@ fn load_package(path: &Path) -> Result<Package> {
         eprintln!("warning: the package has no account/user.json, so it cannot be checked that it is yours");
     }
     Ok(package)
+}
+
+/// A CSV or JSON record of the run, encrypted if a passphrase is given.
+enum Exporter {
+    Plain(PathBuf, ExportWriter<io::BufWriter<std::fs::File>>),
+    Encrypted(
+        PathBuf,
+        ExportWriter<vault::StreamWriter<io::BufWriter<std::fs::File>>>,
+    ),
+}
+
+impl Exporter {
+    fn create(path: &Path, passphrase: Option<&SecretString>) -> Result<Self> {
+        let format = ExportFormat::for_path(path);
+        Ok(match passphrase {
+            None => {
+                let file = std::fs::File::create(path)
+                    .with_context(|| format!("cannot create {}", path.display()))?;
+                Exporter::Plain(
+                    path.to_owned(),
+                    ExportWriter::new(io::BufWriter::new(file), format)?,
+                )
+            }
+            Some(passphrase) => {
+                let mut name = path.as_os_str().to_owned();
+                if path.extension().is_none_or(|e| e != "age") {
+                    name.push(".age");
+                }
+                let path = PathBuf::from(name);
+                let file = std::fs::File::create(&path)
+                    .with_context(|| format!("cannot create {}", path.display()))?;
+                let sealer = vault::encrypt(passphrase, io::BufWriter::new(file))?;
+                Exporter::Encrypted(path, ExportWriter::new(sealer, format)?)
+            }
+        })
+    }
+
+    fn observe(&mut self, event: &Event) -> Result<()> {
+        let (path, result) = match self {
+            Exporter::Plain(path, w) => (path, w.observe(event)),
+            Exporter::Encrypted(path, w) => (path, w.observe(event)),
+        };
+        result.with_context(|| format!("could not write {}", path.display()))
+    }
+
+    fn finish(self) -> Result<()> {
+        let (path, rows, result) = match self {
+            Exporter::Plain(path, w) => {
+                let rows = w.rows();
+                (path, rows, w.finish().map(drop))
+            }
+            Exporter::Encrypted(path, w) => {
+                let rows = w.rows();
+                let result = w.finish().and_then(|sealer| sealer.finish()).map(drop);
+                (path, rows, result)
+            }
+        };
+        result.with_context(|| format!("could not write {}", path.display()))?;
+        println!("Saved {rows} message(s) to {}.", path.display());
+        Ok(())
+    }
+}
+
+/// The passphrase from `file`, or asked for. A new one may be left empty
+/// to get a generated one, which must then be confirmed.
+fn ask_passphrase(file: Option<&Path>, new: bool) -> Result<SecretString> {
+    if let Some(file) = file {
+        return vault::read_passphrase_file(file)
+            .with_context(|| format!("cannot read the passphrase from {}", file.display()));
+    }
+    if !io::stdin().is_terminal() {
+        bail!("an encrypted backup or export needs a passphrase: pass --passphrase-file FILE, or --no-encrypt");
+    }
+    if !new {
+        return Ok(vault::secret(&rpassword::prompt_password(
+            "Passphrase (input hidden): ",
+        )?));
+    }
+    let typed = rpassword::prompt_password(
+        "Passphrase for the encrypted backup and export (input hidden; press Enter to get one): ",
+    )?;
+    if !typed.is_empty() {
+        let again = rpassword::prompt_password("The same passphrase again: ")?;
+        if again != typed {
+            bail!("the passphrases differ");
+        }
+        if typed.chars().count() < 12 {
+            eprintln!("warning: a passphrase this short can be guessed; a sentence or several words are safer");
+        }
+        return Ok(vault::secret(&typed));
+    }
+    let generated = vault::generate_passphrase();
+    let words: Vec<&str> = generated.split(' ').collect();
+    println!("\nYour passphrase (write it down; without it the backup cannot be opened):\n");
+    println!("    {generated}\n");
+    for position in [3, 7, 11] {
+        loop {
+            print!("Type word {position} to confirm: ");
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            if io::stdin().read_line(&mut answer)? == 0 {
+                bail!("not confirmed");
+            }
+            if answer.trim().eq_ignore_ascii_case(words[position - 1]) {
+                break;
+            }
+            println!("That is not word {position}.");
+        }
+    }
+    Ok(vault::secret(&generated))
 }
 
 fn read_token() -> Result<String> {
@@ -934,6 +1121,8 @@ struct Plan {
     control: JobControl,
     verbose: bool,
     export: Option<PathBuf>,
+    /// Encrypts the export, if set.
+    export_passphrase: Option<SecretString>,
     /// Where to keep track of the progress, and what is known so far.
     state: Option<(PathBuf, SavedRun)>,
 }
@@ -952,6 +1141,7 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
         control,
         verbose,
         export,
+        export_passphrase,
         mut state,
     } = plan;
     let export = export.as_deref();
@@ -961,7 +1151,12 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
             .with_context(|| format!("cannot write the state file {}", file.display()))?;
     }
     // Created before anything is deleted, so a bad path costs nothing.
-    let backup_list = match &options.backup_dir {
+    // An encrypted backup keeps its own list, inside the archive.
+    let plain_backup = options
+        .backup_dir
+        .as_ref()
+        .filter(|_| options.backup_encryption.is_none());
+    let backup_list = match plain_backup {
         Some(dir) => {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("cannot create {}", dir.display()))?;
@@ -971,11 +1166,11 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
         None => None,
     };
     let mut exporters = Vec::new();
-    for path in export.into_iter().chain(backup_list.as_deref()) {
-        let file = std::fs::File::create(path)
-            .with_context(|| format!("cannot create {}", path.display()))?;
-        let writer = ExportWriter::new(io::BufWriter::new(file), ExportFormat::for_path(path))?;
-        exporters.push((path.to_owned(), writer));
+    if let Some(path) = export {
+        exporters.push(Exporter::create(path, export_passphrase.as_ref())?);
+    }
+    if let Some(path) = &backup_list {
+        exporters.push(Exporter::create(path, None)?);
     }
     let (tx, mut rx) = mpsc::unbounded_channel();
     let dry_run = options.dry_run;
@@ -1006,19 +1201,13 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
                     .with_context(|| format!("cannot write the state file {}", file.display()))?;
             }
         }
-        for (path, exporter) in &mut exporters {
-            exporter
-                .observe(&event)
-                .with_context(|| format!("could not write {}", path.display()))?;
+        for exporter in &mut exporters {
+            exporter.observe(&event)?;
         }
     }
     let summary = task.await?;
-    for (path, exporter) in exporters {
-        let rows = exporter.rows();
-        exporter
-            .finish()
-            .with_context(|| format!("could not write {}", path.display()))?;
-        println!("Saved {rows} message(s) to {}.", path.display());
+    for exporter in exporters {
+        exporter.finish()?;
     }
 
     println!(
@@ -1126,6 +1315,19 @@ impl Progress {
                 stats.deleted, self.deleted_label, stats.skipped, stats.failed
             )),
             Event::Notice { notice } => self.line(format!("  {}", describe_notice(notice))),
+            Event::BackupSealed {
+                archive,
+                files,
+                messages,
+            } => self.line(format!(
+                "Backup: {} file(s) and {messages} message(s) in {} (encrypted).",
+                files,
+                archive.display()
+            )),
+            Event::BackupKept { folder, reason } => self.line(format!(
+                "The backup stays in {} for now: {reason}.",
+                folder.display()
+            )),
             Event::Finished(_) => {
                 self.clear_status();
                 return;

@@ -32,6 +32,11 @@ impl Backup {
     /// Prepares `folder`, creating it if needed.
     pub fn new(folder: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(folder.join("attachments"))?;
+        Self::downloader(folder)
+    }
+
+    /// Only downloads; nothing is written to `folder`.
+    pub(crate) fn downloader(folder: &Path) -> std::io::Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))
@@ -54,27 +59,13 @@ impl Backup {
     pub async fn save(&self, client: &Client, message: &Message) -> Result<Vec<String>, String> {
         let mut saved = Vec::with_capacity(message.attachments.len());
         for (index, attachment) in message.attachments.iter().enumerate() {
-            let url = attachment["url"]
-                .as_str()
-                .ok_or("an attachment has no link")?
-                .to_owned();
-            let name = attachment["filename"]
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| file_name_of(&url));
-            let relative = format!(
-                "attachments/{}/{}_{}_{}",
-                message.channel_id,
-                message.id,
-                index + 1,
-                safe_file_name(&name)
-            );
+            let (url, name, relative) = attachment_path(message, index, attachment)?;
             let path = self.folder.join(&relative);
             if tokio::fs::try_exists(&path).await.unwrap_or(false) {
                 saved.push(relative);
                 continue;
             }
-            self.download(client, &url, &path)
+            self.download(client, &url, Dest::File(&path))
                 .await
                 .map_err(|err| format!("could not save {name}: {err}"))?;
             saved.push(relative);
@@ -82,7 +73,18 @@ impl Backup {
         Ok(saved)
     }
 
-    async fn download(&self, client: &Client, url: &str, path: &Path) -> Result<(), String> {
+    /// Downloads an attachment into memory, for the encrypted backup.
+    pub(crate) async fn download_bytes(
+        &self,
+        client: &Client,
+        url: &str,
+    ) -> Result<Vec<u8>, String> {
+        let mut data = Vec::new();
+        self.download(client, url, Dest::Memory(&mut data)).await?;
+        Ok(data)
+    }
+
+    async fn download(&self, client: &Client, url: &str, mut dest: Dest<'_>) -> Result<(), String> {
         check_host(url, client.api_base())?;
         let api = client.api_base();
         let mut url = url.to_owned();
@@ -90,7 +92,7 @@ impl Backup {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.fetch(&url, path).await {
+            match self.fetch(&url, &mut dest).await {
                 Ok(()) => return Ok(()),
                 // Expired link (typical for data packages): ask for a fresh one.
                 Err(Fetch::Status(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN)) if !refreshed => {
@@ -121,13 +123,23 @@ impl Backup {
         }
     }
 
-    /// Downloads into a temporary file next to `path` and renames it, so a
-    /// half-written file never looks complete.
-    async fn fetch(&self, url: &str, path: &Path) -> Result<(), Fetch> {
+    /// Downloads into memory, or into a temporary file next to the target
+    /// that is then renamed, so a half-written file never looks complete.
+    async fn fetch(&self, url: &str, dest: &mut Dest<'_>) -> Result<(), Fetch> {
         let mut response = self.http.get(url).send().await.map_err(Fetch::Network)?;
         if !response.status().is_success() {
             return Err(Fetch::Status(response.status()));
         }
+        let path = match dest {
+            Dest::File(path) => *path,
+            Dest::Memory(data) => {
+                data.clear();
+                while let Some(chunk) = response.chunk().await.map_err(Fetch::Network)? {
+                    data.extend_from_slice(&chunk);
+                }
+                return Ok(());
+            }
+        };
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(Fetch::Io)?;
         }
@@ -152,6 +164,11 @@ impl Backup {
     }
 }
 
+enum Dest<'a> {
+    File(&'a Path),
+    Memory(&'a mut Vec<u8>),
+}
+
 enum Fetch {
     Status(StatusCode),
     Network(reqwest::Error),
@@ -170,6 +187,31 @@ impl std::fmt::Display for Fetch {
 
 /// Discord's file servers over HTTPS, or the configured API server itself
 /// (which is discord.com in production and a fake server in tests).
+/// An attachment's link, file name and path in the backup:
+/// `attachments/<channel ID>/<message ID>_<n>_<name>`.
+pub(crate) fn attachment_path(
+    message: &Message,
+    index: usize,
+    attachment: &serde_json::Value,
+) -> Result<(String, String, String), String> {
+    let url = attachment["url"]
+        .as_str()
+        .ok_or("an attachment has no link")?
+        .to_owned();
+    let name = attachment["filename"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| file_name_of(&url));
+    let relative = format!(
+        "attachments/{}/{}_{}_{}",
+        message.channel_id,
+        message.id,
+        index + 1,
+        safe_file_name(&name)
+    );
+    Ok((url, name, relative))
+}
+
 fn check_host(url: &str, api_base: &str) -> Result<(), String> {
     let parsed = Url::parse(url).map_err(|_| format!("not a valid link: {url}"))?;
     let discord = parsed.scheme() == "https"

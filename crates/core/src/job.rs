@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -24,6 +24,7 @@ use crate::resume::Checkpoint;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
+use crate::vault::{EncryptedBackup, EncryptedBackupSettings, KeySlot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -45,6 +46,12 @@ pub struct JobOptions {
     /// message whose attachments cannot be saved is not deleted. Also done in
     /// a dry run, which then backs up without deleting anything.
     pub backup_dir: Option<PathBuf>,
+    /// Write the backup encrypted instead, into these parts (see
+    /// [`crate::vault`]); `backup_dir` is then only where it lives.
+    pub backup_encryption: Option<EncryptedBackupSettings>,
+    /// The keys for finishing the encrypted backup. Never saved.
+    #[serde(skip)]
+    pub backup_keys: KeySlot,
     /// Continue an earlier run: skip what it finished and dealt with.
     pub resume: Option<Checkpoint>,
 }
@@ -58,6 +65,8 @@ impl Default for JobOptions {
             dry_run: false,
             overwrite: None,
             backup_dir: None,
+            backup_encryption: None,
+            backup_keys: KeySlot::default(),
             resume: None,
         }
     }
@@ -151,6 +160,18 @@ pub enum Event {
         stats: Stats,
         /// False when the target was interrupted or could not be searched.
         complete: bool,
+    },
+    /// The encrypted backup was combined into one archive.
+    BackupSealed {
+        archive: PathBuf,
+        files: u64,
+        messages: u64,
+    },
+    /// The encrypted backup stays in parts, e.g. because the run was stopped;
+    /// a continued run finishes it.
+    BackupKept {
+        folder: PathBuf,
+        reason: String,
     },
     Notice {
         notice: Notice,
@@ -388,7 +409,29 @@ async fn run_from(
             return summary;
         }
     };
-    let backup = match options.backup_dir.as_deref().map(Backup::new).transpose() {
+    let vault = match options
+        .backup_encryption
+        .as_ref()
+        .map(|settings| EncryptedBackup::open(settings, options.backup_keys.0.clone()))
+        .transpose()
+    {
+        Ok(vault) => vault,
+        Err(err) => {
+            let summary = Summary {
+                stats: Stats::default(),
+                cancelled: false,
+                error: Some(format!("cannot write the encrypted backup: {err}")),
+            };
+            let _ = events.send(Event::Finished(summary.clone()));
+            return summary;
+        }
+    };
+    let plain_dir = if vault.is_some() {
+        None
+    } else {
+        options.backup_dir.as_deref()
+    };
+    let backup = match plain_dir.map(Backup::new).transpose() {
         Ok(backup) => backup,
         Err(err) => {
             let summary = Summary {
@@ -415,6 +458,8 @@ async fn run_from(
         query: filter.search_query(me),
         matcher,
         backup,
+        vault: vault.as_ref(),
+        pending: Mutex::new(Vec::new()),
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
@@ -428,10 +473,16 @@ async fn run_from(
             name: target.name.clone(),
         });
         let mut stats = Stats::default();
-        let result = match source {
+        let mut result = match source {
             Source::Search => job.purge_target(target, &mut stats).await,
             Source::Package(package) => job.purge_known(target, package, &mut stats).await,
         };
+        // Messages waiting for their part of the encrypted backup.
+        if result.is_ok() {
+            result = job.flush(target, &mut stats).await;
+        } else {
+            job.abandon_pending();
+        }
         total.add(stats);
         let complete = result.is_ok();
         match result {
@@ -452,6 +503,43 @@ async fn run_from(
         }
     }
     client.set_notice_sink(None);
+    drop(job);
+
+    if let Some(vault) = vault {
+        let finished = stopped_by.is_none();
+        let outcome = tokio::task::spawn_blocking(move || {
+            if finished {
+                vault.seal().map(Ok)
+            } else {
+                vault.suspend().map(Err)
+            }
+        })
+        .await;
+        let event = match outcome {
+            Ok(Ok(Ok(sealed))) => Event::BackupSealed {
+                archive: sealed.archive,
+                files: sealed.files,
+                messages: sealed.messages,
+            },
+            Ok(Ok(Err(folder))) => Event::BackupKept {
+                folder,
+                reason: "the clean-up was stopped; continue it to finish the backup".into(),
+            },
+            Ok(Err(reason)) => Event::BackupKept {
+                folder: options
+                    .backup_encryption
+                    .as_ref()
+                    .map(|s| s.parts.clone())
+                    .unwrap_or_default(),
+                reason,
+            },
+            Err(err) => Event::BackupKept {
+                folder: PathBuf::new(),
+                reason: err.to_string(),
+            },
+        };
+        let _ = events.send(event);
+    }
 
     let summary = Summary {
         stats: total,
@@ -460,7 +548,7 @@ async fn run_from(
             .filter(|err| !matches!(err, Error::Cancelled))
             .map(|err| err.to_string()),
     };
-    job.emit(Event::Finished(summary.clone()));
+    let _ = events.send(Event::Finished(summary.clone()));
     summary
 }
 
@@ -474,6 +562,10 @@ struct Job<'a> {
     query: SearchQuery,
     matcher: Matcher,
     backup: Option<Backup>,
+    vault: Option<&'a EncryptedBackup>,
+    /// Backed-up messages waiting for their part to be sealed before they
+    /// are deleted.
+    pending: Mutex<Vec<(Message, Vec<String>)>>,
 }
 
 impl Job<'_> {
@@ -487,8 +579,46 @@ impl Job<'_> {
     }
 
     fn emit(&self, event: Event) {
+        if let Some(vault) = self.vault {
+            vault.observe(&event);
+        }
         // The receiver only goes away when nobody watches the job any more.
         let _ = self.events.send(event);
+    }
+
+    /// Seals the open part of the encrypted backup, then deletes the
+    /// messages whose files are in it. If sealing fails they are kept.
+    async fn flush(&self, target: &Target, stats: &mut Stats) -> Result<()> {
+        let Some(vault) = self.vault else {
+            return Ok(());
+        };
+        let waiting = std::mem::take(&mut *self.pending.lock().unwrap());
+        if let Err(err) = vault.commit() {
+            for (message, _) in waiting {
+                stats.failed += 1;
+                self.emit(Event::Failed {
+                    target_id: target.id,
+                    message_id: message.id,
+                    error: format!("kept, because the backup could not be written: {err}"),
+                });
+            }
+            return Ok(());
+        }
+        for (message, saved) in waiting {
+            self.delete(target, message, saved, stats).await?;
+        }
+        Ok(())
+    }
+
+    /// The run stops: what is backed up stays backed up, and its messages
+    /// are not deleted.
+    fn abandon_pending(&self) {
+        if let Some(vault) = self.vault {
+            self.pending.lock().unwrap().clear();
+            if let Err(err) = vault.commit() {
+                tracing::warn!(%err, "could not seal the backup part");
+            }
+        }
     }
 
     /// Pages through the search results from newest to oldest, moving the
@@ -657,6 +787,36 @@ impl Job<'_> {
             self.skipped(target, &message, reason);
             return Ok(());
         }
+        // Encrypted backup: the message waits until its part is sealed.
+        if let Some(vault) = self.vault {
+            if !message.attachments.is_empty() {
+                self.control.checkpoint().await?;
+                let saved = match self.control.guard(vault.add(self.client, &message)).await? {
+                    Ok(saved) => saved,
+                    Err(error) => {
+                        stats.failed += 1;
+                        self.emit(Event::Failed {
+                            target_id: target.id,
+                            message_id: message.id,
+                            error: format!(
+                                "kept, because its attachments could not be backed up: {error}"
+                            ),
+                        });
+                        return Ok(());
+                    }
+                };
+                if self.options.dry_run {
+                    stats.deleted += 1;
+                    self.deleted(target, &message, true, saved);
+                    return Ok(());
+                }
+                self.pending.lock().unwrap().push((message, saved));
+                if vault.part_is_full() {
+                    self.flush(target, stats).await?;
+                }
+                return Ok(());
+            }
+        }
         // Attachments are saved first; without a copy the message stays.
         let saved = match &self.backup {
             Some(backup) if !message.attachments.is_empty() => {
@@ -687,7 +847,17 @@ impl Job<'_> {
             self.deleted(target, &message, true, saved);
             return Ok(());
         }
+        self.delete(target, message, saved, stats).await
+    }
 
+    /// Overwrites (if asked) and deletes a message that passed every check.
+    async fn delete(
+        &self,
+        target: &Target,
+        message: Message,
+        saved: Vec<String>,
+        stats: &mut Stats,
+    ) -> Result<()> {
         self.control.checkpoint().await?;
         // From here on the requests are not abandoned when the job is stopped:
         // Discord may already have carried them out, and the message must be

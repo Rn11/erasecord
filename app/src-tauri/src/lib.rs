@@ -26,6 +26,8 @@ pub fn run() {
             commands::close_package,
             commands::preview_package,
             commands::insights_info,
+            commands::generate_passphrase,
+            commands::open_backup,
             commands::insights_overview,
             commands::insights_time,
             commands::insights_places,

@@ -23,6 +23,7 @@ pub mod search;
 pub mod snowflake;
 mod stopwords;
 pub mod targets;
+pub mod vault;
 
 pub use client::{Client, ClientConfig, Notice, NoticeSink};
 pub use delete::SkipReason;

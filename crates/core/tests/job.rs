@@ -2,8 +2,11 @@ mod common;
 
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use common::*;
 use erasecord_core::package::{PackageChannel, PackageMessage};
+use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot};
 use erasecord_core::{
     job, Checkpoint, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake,
     Summary, Target, TargetKind,
@@ -1020,4 +1023,151 @@ async fn a_stopped_package_run_can_be_continued() {
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::TargetEstimate { total, .. } if *total == remaining)));
+}
+
+fn encrypted_options(dir: &std::path::Path, passphrase: &str) -> JobOptions {
+    let (settings, keys) =
+        EncryptedBackupSettings::create(dir, vault::secret(passphrase)).expect("backup created");
+    JobOptions {
+        backup_dir: Some(dir.to_owned()),
+        backup_encryption: Some(settings),
+        backup_keys: KeySlot(Some(Arc::new(keys))),
+        ..fast()
+    }
+}
+
+fn photos(count: i64) -> Vec<FakeMessage> {
+    (0..count)
+        .map(|minute| FakeMessage {
+            files: vec![format!("photo{minute}.png")],
+            ..FakeMessage::in_dm(minute, 0)
+        })
+        .collect()
+}
+
+/// Every file below `dir`, recursively.
+fn files_below(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(files_below(&path));
+        } else {
+            found.push(path);
+        }
+    }
+    found
+}
+
+#[tokio::test]
+async fn an_encrypted_backup_becomes_one_archive() {
+    let mut messages = photos(30);
+    messages.extend((40..43).map(|minute| FakeMessage::in_dm(minute, 0)));
+    let fake = FakeDiscord::start(State::with_messages(messages.clone())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = encrypted_options(dir.path(), "correct horse battery staple");
+
+    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.failed), (33, 0));
+    assert!(fake.remaining().is_empty());
+    let sealed = events.iter().find_map(|e| match e {
+        Event::BackupSealed {
+            archive,
+            files,
+            messages,
+        } => Some((archive.clone(), *files, *messages)),
+        _ => None,
+    });
+    let (archive, files, rows) = sealed.expect("the backup was sealed");
+    assert_eq!((files, rows), (30, 33));
+    // One file is left: the archive. No parts, nothing readable.
+    let left = files_below(dir.path());
+    assert_eq!(left, std::slice::from_ref(&archive));
+    let raw = std::fs::read(&archive).unwrap();
+    assert!(!raw.windows(11).any(|w| w == b"contents of"));
+
+    let out = tempfile::tempdir().unwrap();
+    let wrong = vault::open(&archive, &vault::secret("wrong"), out.path());
+    assert!(wrong.is_err());
+    let opened = vault::open(
+        &archive,
+        &vault::secret("correct horse battery staple"),
+        out.path(),
+    )
+    .unwrap();
+    assert_eq!((opened.files, opened.messages), (30, 33));
+    let photo = &messages[3];
+    let saved = out.path().join(format!(
+        "attachments/{DM_CHANNEL}/{}_1_photo3.png",
+        photo.id
+    ));
+    assert_eq!(
+        std::fs::read_to_string(saved).unwrap(),
+        "contents of photo3.png"
+    );
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(out.path().join("messages.json")).unwrap()).unwrap();
+    assert_eq!(list.len(), 33);
+}
+
+#[tokio::test]
+async fn a_stopped_encrypted_backup_is_finished_by_continuing() {
+    let fake = FakeDiscord::start(State::with_messages(photos(40))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = encrypted_options(dir.path(), "pass");
+    options.delete_delay_ms = 30;
+    let settings = options.backup_encryption.clone().unwrap();
+
+    let control = JobControl::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let task = {
+        let (client, control, options) = (fake.client(), control.clone(), options.clone());
+        tokio::spawn(async move {
+            job::run(
+                &client,
+                Snowflake(ME),
+                &[dm_target()],
+                &Filter::default(),
+                &options,
+                &control,
+                tx,
+            )
+            .await
+        })
+    };
+    // The first part is sealed after 25 messages; stop in the second.
+    wait_until("the first part was deleted", || fake.delete_calls() >= 26).await;
+    control.cancel();
+    let summary = tokio::time::timeout(Duration::from_secs(10), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(summary.cancelled);
+    let mut first = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        first.push(event);
+    }
+    assert!(first.iter().any(|e| matches!(e, Event::BackupKept { .. })));
+    assert!(settings.parts.join("key.age").exists());
+
+    // Continuing needs the passphrase to finish the backup.
+    assert!(settings.unlock(vault::secret("nope")).is_err());
+    let keys = settings.unlock(vault::secret("pass")).unwrap();
+    let options = JobOptions {
+        resume: Some(checkpoint_of(&first)),
+        backup_keys: KeySlot(Some(Arc::new(keys))),
+        delete_delay_ms: 0,
+        ..options
+    };
+    let (summary, events) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+    assert!(summary.error.is_none(), "{:?}", summary.error);
+    assert!(fake.remaining().is_empty());
+    let files = events.iter().find_map(|e| match e {
+        Event::BackupSealed { files, .. } => Some(*files),
+        _ => None,
+    });
+    // Each photo once, although some were saved by both runs.
+    assert_eq!(files, Some(40));
+    assert!(!settings.parts.exists());
 }
