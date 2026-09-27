@@ -49,7 +49,7 @@ impl Pace {
     pub fn after_delete(&self) -> (Duration, bool) {
         let count = self.deletions.fetch_add(1, Ordering::Relaxed) + 1;
         let pause = self.scaled(self.delete_ms);
-        if count % BREAK_EVERY == 0 && self.delete_ms > 0 {
+        if count.is_multiple_of(BREAK_EVERY) && self.delete_ms > 0 {
             (jitter(pause * BREAK_PAUSES), true)
         } else {
             (jitter(pause), false)

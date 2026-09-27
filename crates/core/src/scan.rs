@@ -384,6 +384,7 @@ pub enum ScanEvent {
 /// Counts, then reads the matching messages of every target into `cache`,
 /// reporting progress and statistics. Stops early when cancelled, keeping
 /// what was read.
+#[allow(clippy::too_many_arguments)]
 pub async fn scan(
     client: &Client,
     me: Snowflake,
