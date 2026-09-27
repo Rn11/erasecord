@@ -13,8 +13,9 @@ use erasecord_core::insights::Index;
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot, SecretString};
 use erasecord_core::{
-    friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
-    ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target, TargetKind,
+    friends_without_dm, list_channels, list_targets, open_dm, Activity, Client, ClientConfig,
+    ExportFormat, ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target,
+    TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -1315,6 +1316,14 @@ impl Progress {
                 stats.deleted, self.deleted_label, stats.skipped, stats.failed
             )),
             Event::Notice { notice } => self.line(format!("  {}", describe_notice(notice))),
+            Event::Activity { activity } => match activity {
+                Activity::Break { ms } => self.line(format!(
+                    "  taking a break of {} s, to go easy on Discord",
+                    ms.div_ceil(1000)
+                )),
+                Activity::SealingBackup => self.line("  finishing the backup…".to_owned()),
+                _ => {}
+            },
             Event::BackupSealed {
                 archive,
                 files,
