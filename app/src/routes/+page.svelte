@@ -34,8 +34,9 @@
   import Preview from "$lib/components/Preview.svelte";
   import Progress from "$lib/components/Progress.svelte";
   import Setup from "$lib/components/Setup.svelte";
+  import Stats from "$lib/components/Stats.svelte";
 
-  type Screen = "starting" | "login" | "setup" | "preview" | "progress";
+  type Screen = "starting" | "login" | "setup" | "preview" | "progress" | "stats";
 
   let screen = $state<Screen>("starting");
   let user = $state<User | null>(null);
@@ -405,6 +406,7 @@
         {importError}
         onImport={importPackage}
         onClosePackage={closePackage}
+        onStats={() => (screen = "stats")}
         loading={targetsLoading}
         error={targetsError}
         {selected}
@@ -436,6 +438,8 @@
         onCancel={() => api.cancelJob()}
         onStart={start}
       />
+    {:else if screen === "stats" && pkg}
+      <Stats {pkg} onBack={() => (screen = "setup")} />
     {:else if screen === "progress" && run}
       <Progress {run} onPause={pause} onResume={resume} onStop={() => api.cancelJob()} onDone={finish} />
     {/if}

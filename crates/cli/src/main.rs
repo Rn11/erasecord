@@ -73,6 +73,16 @@ enum Command {
         #[command(flatten)]
         options: DeleteOptions,
     },
+    /// Statistics about the messages in your Discord data package: when and where you
+    /// wrote. Needs no token.
+    Stats {
+        /// The data package (.zip or extracted folder).
+        #[arg(value_name = "PATH")]
+        package: PathBuf,
+        /// Print JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Continue a clean-up that was started with `delete --state FILE` and did not
     /// finish, with exactly the servers, DMs and conditions it had.
     Resume {
@@ -206,6 +216,7 @@ impl Command {
             Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
                 selection.package.as_deref()
             }
+            Command::Stats { package, .. } => Some(package),
             Command::Channels { .. } | Command::Resume { .. } => None,
         }
     }
@@ -213,9 +224,10 @@ impl Command {
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
-            Command::List { .. } | Command::Channels { .. } | Command::Resume { .. } => {
-                return Ok(())
-            }
+            Command::List { .. }
+            | Command::Channels { .. }
+            | Command::Resume { .. }
+            | Command::Stats { .. } => return Ok(()),
             Command::Preview {
                 selection,
                 range,
@@ -273,8 +285,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         None => None,
     };
     // Reading the package and counting in it needs no Discord account.
-    let offline =
-        package.is_some() && matches!(cli.command, Command::List { .. } | Command::Preview { .. });
+    let offline = package.is_some()
+        && matches!(
+            cli.command,
+            Command::List { .. } | Command::Preview { .. } | Command::Stats { .. }
+        );
     let session = if offline {
         None
     } else {
@@ -295,6 +310,17 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     handle_ctrl_c(control.clone(), graceful.clone());
 
     match cli.command {
+        Command::Stats { json, .. } => {
+            let package = package.expect("package loaded");
+            let offset = chrono::Local::now().offset().local_minus_utc() / 60;
+            let stats = erasecord_core::stats::Statistics::of(&package, offset);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                print_stats(&stats, &package.targets());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
         Command::List { json, friends, .. } => {
             if let Some(package) = &package {
                 let targets = package.targets();
@@ -1024,6 +1050,75 @@ fn parse_age(input: &str) -> Option<Result<DateTime<Utc>, String>> {
         _ => return None,
     };
     Some(time.ok_or_else(|| format!("{input} is too far in the past")))
+}
+
+fn print_stats(stats: &erasecord_core::stats::Statistics, places: &[PackageTarget]) {
+    let day = |t: Option<chrono::DateTime<chrono::Utc>>| {
+        t.map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_default()
+    };
+    println!(
+        "Messages      {} on {} days, {} to {}",
+        stats.messages,
+        stats.active_days,
+        day(stats.first_message),
+        day(stats.last_message)
+    );
+    println!(
+        "Words         {} ({} messages without text)",
+        stats.words, stats.without_text
+    );
+    println!(
+        "Attachments   {} in {} messages",
+        stats.attachments, stats.with_attachments
+    );
+    if let Some(busiest) = &stats.busiest_day {
+        println!(
+            "Busiest day   {} ({} messages)",
+            busiest.date, busiest.messages
+        );
+    }
+    let hours: Vec<u64> = (0..24)
+        .map(|h| stats.week.iter().map(|d| d[h]).sum())
+        .collect();
+    if let Some((hour, _)) = hours.iter().enumerate().max_by_key(|(_, n)| **n) {
+        println!(
+            "Busiest hour  {hour:02}:00-{:02}:00 (local time)",
+            (hour + 1) % 24
+        );
+    }
+    let mut years: Vec<(&str, u64)> = Vec::new();
+    for month in &stats.months {
+        let year = &month.month[..4];
+        match years.last_mut() {
+            Some((y, n)) if *y == year => *n += month.messages,
+            _ => years.push((year, month.messages)),
+        }
+    }
+    if !years.is_empty() {
+        println!("\nPer year");
+        let max = years.iter().map(|(_, n)| *n).max().unwrap_or(1).max(1);
+        for (year, n) in years {
+            let bar = "#".repeat(((n * 40).div_ceil(max)) as usize);
+            println!("  {year}  {n:>7}  {bar}");
+        }
+    }
+    let mut top: Vec<&PackageTarget> = places.iter().collect();
+    top.sort_by_key(|p| std::cmp::Reverse(p.messages));
+    if !top.is_empty() {
+        println!("\nWhere you write most");
+        for place in top.iter().take(10) {
+            println!("  {:>7}  {}", place.messages, place.target.name);
+        }
+        if top.len() > 10 {
+            let rest: u64 = top[10..].iter().map(|p| p.messages).sum();
+            println!("  {rest:>7}  {} other places", top.len() - 10);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5,6 +5,7 @@
 import { emit } from "@tauri-apps/api/event";
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type {
+  Statistics,
   Filter,
   Friend,
   GuildChannel,
@@ -61,6 +62,41 @@ function fakePackage(): PackageSummary {
       { target: target("dm", "4001", "Alice"), messages: 512, channels: [{ id: "4001", name: "Alice", messages: 512 }], ...dates },
       { target: target("dm", "4009", "Old friend"), messages: 425, channels: [{ id: "4009", name: "Old friend", messages: 425 }], ...dates },
     ],
+  };
+}
+
+function fakeStats(): Statistics {
+  // Deterministic, so screenshots stay the same.
+  let seed = 7;
+  const random = () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646;
+  const months: Statistics["months"] = [];
+  for (let i = 0; i < 50; i++) {
+    const date = new Date(2022, 7 + i, 1);
+    const wave = 30 + 40 * Math.sin(i / 5) ** 2 + (i > 30 && i < 36 ? 60 : 0);
+    months.push({
+      month: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
+      messages: i === 12 ? 0 : Math.round(wave * (0.6 + random() * 0.8)),
+    });
+  }
+  const week = Array.from({ length: 7 }, (_, day) =>
+    Array.from({ length: 24 }, (_, hour) => {
+      const evening = hour >= 17 && hour <= 23 ? 3 : hour >= 9 && hour < 17 ? 1.3 : hour < 2 ? 1.5 : 0.1;
+      return Math.round(evening * (day >= 5 ? 1.6 : 1) * (4 + random() * 8));
+    }),
+  );
+  return {
+    messages: 2451,
+    with_attachments: 212,
+    attachments: 263,
+    without_text: 97,
+    words: 18_734,
+    characters: 102_947,
+    first_message: "2022-08-03T18:12:00Z",
+    last_message: "2026-09-20T21:40:00Z",
+    months,
+    week,
+    busiest_day: { date: "2025-04-12", messages: 87 },
+    active_days: 611,
   };
 }
 
@@ -255,6 +291,9 @@ export function installMockBackend() {
           return fakePackage();
         case "close_package":
           return null;
+        case "package_stats":
+          await sleep(300);
+          return fakeStats();
         case "preview_package":
           return (args.targets as Target[]).map((target) => {
             const item = fakePackage().targets.find((t) => t.target.id === target.id);

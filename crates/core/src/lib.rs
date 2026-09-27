@@ -18,6 +18,7 @@ mod ratelimit;
 pub mod resume;
 pub mod search;
 pub mod snowflake;
+pub mod stats;
 pub mod targets;
 
 pub use client::{Client, ClientConfig, Notice, NoticeSink};

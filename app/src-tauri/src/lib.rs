@@ -25,6 +25,7 @@ pub fn run() {
             commands::import_package,
             commands::close_package,
             commands::preview_package,
+            commands::package_stats,
             commands::pause_job,
             commands::resume_job,
             commands::cancel_job,

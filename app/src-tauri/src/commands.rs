@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry, Stats};
+use erasecord_core::stats::Statistics;
 use erasecord_core::{
     Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
     PackageTarget, SavedRun, Snowflake, Target, TargetKind, User,
@@ -519,6 +520,18 @@ pub async fn preview_package(
         &targets,
         &filter,
     )?)
+}
+
+/// Statistics about the imported package, in the given time zone.
+#[tauri::command]
+pub async fn package_stats(
+    state: State<'_, AppState>,
+    utc_offset_minutes: i32,
+) -> CommandResult<Statistics> {
+    let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
+    tauri::async_runtime::spawn_blocking(move || Statistics::of(&package, utc_offset_minutes))
+        .await
+        .map_err(|err| CommandError::other(err.to_string()))
 }
 
 #[tauri::command]

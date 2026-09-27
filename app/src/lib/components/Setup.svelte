@@ -24,6 +24,7 @@
     importError,
     onImport,
     onClosePackage,
+    onStats,
     loading,
     error,
     selected,
@@ -49,6 +50,7 @@
     importError: string | null;
     onImport: (folder: boolean) => void;
     onClosePackage: () => void;
+    onStats: () => void;
     loading: boolean;
     error: string | null;
     selected: SvelteSet<string>;
@@ -235,7 +237,10 @@
             places: t("count.place", { count: pkg.targets.length }),
           })}
         </span>
-        <button class="link" onclick={onClosePackage}>{t("setup.backToLive")}</button>
+        <span class="import">
+          <button class="link" onclick={onStats}>{t("setup.stats")}</button>
+          <button class="link" onclick={onClosePackage}>{t("setup.backToLive")}</button>
+        </span>
       {:else if importing}
         <span class="muted"><span class="spinner"></span> {t("setup.readingPackage")}</span>
       {:else}
