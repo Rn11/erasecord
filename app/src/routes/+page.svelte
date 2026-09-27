@@ -19,6 +19,8 @@
   } from "$lib/format";
   import { forgetLastPackage, loadLastPackage, saveLastPackage, type LastPackage } from "$lib/lastPackage";
   import { loadLast, saveLast, snapshot } from "$lib/presets";
+  import { newChoice, passphraseInput, type PassphraseChoice } from "$lib/passphrase";
+  import OpenBackup from "$lib/components/OpenBackup.svelte";
   import { applyEvent, newRun, type RunState } from "$lib/run";
   import type {
     Filter,
@@ -26,6 +28,7 @@
     GuildChannel,
     JobOptions,
     PackageSummary,
+    PassphraseInput,
     PreviewEntry,
     Target,
     UnfinishedRun,
@@ -86,6 +89,15 @@
   let previewError = $state<string | null>(null);
 
   let run = $state<RunState | null>(null);
+  /** Encrypt backups (recommended); the passphrase lives in memory only. */
+  let encrypt = $state(true);
+  let passphrase = $state<PassphraseChoice | null>(null);
+  /** The passphrase of the last run's backup, offered for saving its list. */
+  let lastRunPassphrase = $state<PassphraseInput | null>(null);
+  let resumePass = $state("");
+  let resumePassFile = $state<string | null>(null);
+  let resumeError = $state<string | null>(null);
+  let openingBackup = $state(false);
   /** A clean-up that was stopped or cut short and can be continued. */
   let unfinished = $state<UnfinishedRun | null>(null);
 
@@ -156,7 +168,7 @@
     offline = false;
     notice = rememberError ? t("page.rememberFailed", { error: rememberError }) : null;
     screen = "setup";
-    await Promise.all([loadTargets(), checkUnfinished()]);
+    await Promise.all([loadTargets(), checkUnfinished(), passphrase ? null : freshPassphrase()]);
   }
 
   async function checkUnfinished() {
@@ -170,17 +182,50 @@
   async function continueRun() {
     if (!unfinished) return;
     const from = $state.snapshot(unfinished);
+    const pass: PassphraseInput | null = from.encrypted_backup
+      ? resumePassFile && !resumePass
+        ? { file: resumePassFile }
+        : { text: resumePass }
+      : null;
+    resumeError = null;
     unfinished = null;
     run = newRun(from.targets, 0, false, { finished: from.finished, stats: from.stats });
     screen = "progress";
     try {
-      await api.resumeRun();
+      await api.resumeRun(pass);
+      lastRunPassphrase = pass;
+      resumePass = "";
     } catch (err) {
       const message = fail(err);
-      if (message && run) {
+      if (message && from.encrypted_backup) {
+        // Most likely a wrong passphrase: stay on the banner.
+        run = null;
+        screen = "setup";
+        unfinished = from;
+        resumeError = message;
+      } else if (message && run) {
         run.summary = { stats: run.totals, cancelled: false, error: message };
         run.finishedAt = Date.now();
       }
+    }
+  }
+
+  async function pickResumePassFile() {
+    const file = await open({ multiple: false, directory: false, title: t("pass.pickFile") });
+    if (typeof file === "string") resumePassFile = file;
+  }
+
+  /** A fresh passphrase for the next encrypted backup. */
+  async function freshPassphrase() {
+    try {
+      const next = newChoice(await api.generatePassphrase());
+      // Someone using their own passphrase or a file keeps it.
+      if (passphrase && passphrase.mode !== "generated") {
+        Object.assign(next, { mode: passphrase.mode, own: passphrase.own, repeat: passphrase.repeat, file: passphrase.file });
+      }
+      passphrase = next;
+    } catch {
+      passphrase = null;
     }
   }
 
@@ -395,8 +440,13 @@
     screen = "progress";
     try {
       const jobOptions = { ...$state.snapshot(options), dry_run: dryRun };
-      if (pkg) await api.startPackageJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions);
-      else await api.startJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions);
+      const backupPassphrase =
+        options.backup_dir !== null && encrypt && passphrase ? passphraseInput($state.snapshot(passphrase)) : null;
+      if (pkg) await api.startPackageJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions, backupPassphrase);
+      else await api.startJob($state.snapshot(runTargets), $state.snapshot(filter), jobOptions, backupPassphrase);
+      lastRunPassphrase = backupPassphrase;
+      // Every new backup gets new words.
+      if (backupPassphrase && passphrase?.mode === "generated") void freshPassphrase();
     } catch (err) {
       const message = fail(err);
       if (message && run) {
@@ -427,6 +477,9 @@
 </script>
 
 <div class="app">
+  {#if openingBackup}
+    <OpenBackup onClose={() => (openingBackup = false)} />
+  {/if}
   {#if dragging}
     <div class="drop" aria-hidden="true">
       <div class="drop-box">{t("page.dropPackage")}</div>
@@ -474,10 +527,26 @@
           <span class="muted">{t("resume.hint")}</span>
         </span>
         <span class="resume-actions">
+          {#if unfinished.encrypted_backup}
+            <input
+              type="password"
+              class="resume-pass"
+              autocomplete="off"
+              placeholder={resumePassFile ? t("open.usingFile") : t("resume.passphrase")}
+              aria-label={t("resume.passphrase")}
+              bind:value={resumePass}
+            />
+            <button class="link small" onclick={pickResumePassFile} title={resumePassFile ?? ""}>{t("resume.passFile")}</button>
+          {/if}
           <button class="btn small" onclick={discardRun}>{t("resume.discard")}</button>
-          <button class="btn primary small" onclick={continueRun}>{t("resume.continue")}</button>
+          <button
+            class="btn primary small"
+            onclick={continueRun}
+            disabled={unfinished.encrypted_backup && !resumePass && !resumePassFile}>{t("resume.continue")}</button
+          >
         </span>
       </div>
+      {#if resumeError}<p class="callout error small notice">{resumeError}</p>{/if}
     {/if}
     {#if notice && user}
       <div class="callout info small notice">
@@ -529,6 +598,9 @@
         bind:content
         bind:skipPinned
         bind:options
+        bind:encrypt
+        bind:passphrase
+        onOpenBackup={() => (openingBackup = true)}
         onReload={loadTargets}
         onCount={count}
       />
@@ -545,7 +617,14 @@
         onStart={start}
       />
     {:else if screen === "progress" && run}
-      <Progress {run} onPause={pause} onResume={resume} onStop={() => api.cancelJob()} onDone={finish} />
+      <Progress
+        {run}
+        backupPassphrase={lastRunPassphrase}
+        onPause={pause}
+        onResume={resume}
+        onStop={() => api.cancelJob()}
+        onDone={finish}
+      />
     {/if}
   </main>
 </div>
@@ -635,8 +714,22 @@
     flex: none !important;
   }
 
+  .resume-pass {
+    width: 180px;
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
   .resume-actions {
     display: flex;
+    align-items: center;
     gap: 6px;
     flex: none;
   }

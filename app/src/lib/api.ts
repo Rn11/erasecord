@@ -20,6 +20,8 @@ import type {
   JobEvent,
   JobOptions,
   LoginResult,
+  Opened,
+  PassphraseInput,
   PackageSummary,
   UnfinishedRun,
   PreviewEntry,
@@ -37,8 +39,8 @@ export const api = {
   openDm: (userId: string) => invoke<Target>("open_dm", { userId }),
   preview: (targets: Target[], filter: Filter, options: JobOptions) =>
     invoke<PreviewEntry[]>("preview", { targets, filter, options }),
-  startJob: (targets: Target[], filter: Filter, options: JobOptions) =>
-    invoke<void>("start_job", { targets, filter, options }),
+  startJob: (targets: Target[], filter: Filter, options: JobOptions, backupPassphrase: PassphraseInput | null) =>
+    invoke<void>("start_job", { targets, filter, options, backupPassphrase }),
   importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
   closePackage: () => invoke<void>("close_package"),
   insightsInfo: () => invoke<Info>("insights_info"),
@@ -51,11 +53,14 @@ export const api = {
     invoke<SearchResult>("insights_search", { scope, query, limit }),
   previewPackage: (targets: Target[], filter: Filter) =>
     invoke<PreviewEntry[]>("preview_package", { targets, filter }),
-  startPackageJob: (targets: Target[], filter: Filter, options: JobOptions) =>
-    invoke<void>("start_package_job", { targets, filter, options }),
-  exportRun: (path: string) => invoke<number>("export_run", { path }),
+  startPackageJob: (targets: Target[], filter: Filter, options: JobOptions, backupPassphrase: PassphraseInput | null) =>
+    invoke<void>("start_package_job", { targets, filter, options, backupPassphrase }),
+  exportRun: (path: string, passphrase: PassphraseInput | null) => invoke<number>("export_run", { path, passphrase }),
+  generatePassphrase: () => invoke<string>("generate_passphrase"),
+  openBackup: (path: string, passphrase: PassphraseInput, into: string) =>
+    invoke<Opened>("open_backup", { path, passphrase, into }),
   unfinishedRun: () => invoke<UnfinishedRun | null>("unfinished_run"),
-  resumeRun: () => invoke<UnfinishedRun>("resume_run"),
+  resumeRun: (passphrase: PassphraseInput | null) => invoke<UnfinishedRun>("resume_run", { passphrase }),
   discardRun: () => invoke<void>("discard_run"),
   pauseJob: () => invoke<void>("pause_job"),
   resumeJob: () => invoke<void>("resume_job"),

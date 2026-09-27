@@ -41,6 +41,8 @@ export interface RunState {
   prior: Stats;
   /** The expected total is unknown up front and grows with each estimate. */
   growExpected: boolean;
+  /** What became of an encrypted backup. */
+  backup: { archive: string; files: number; messages: number } | { folder: string; reason: string } | null;
 }
 
 const MAX_LOG_LINES = 500;
@@ -69,6 +71,7 @@ export function newRun(targets: Target[], expected: number, dryRun: boolean, res
     totals: { ...prior },
     prior,
     growExpected: !!resume,
+    backup: null,
     currentId: null,
     startedAt: Date.now(),
     pausedAt: null,
@@ -150,6 +153,14 @@ export function applyEvent(run: RunState, event: JobEvent) {
       break;
     case "notice":
       log(run, "warn", describeNotice(event.notice));
+      break;
+    case "backup_sealed":
+      run.backup = { archive: event.archive, files: event.files, messages: event.messages };
+      log(run, "ok", t("log.backupSealed", { path: event.archive }));
+      break;
+    case "backup_kept":
+      run.backup = { folder: event.folder, reason: event.reason };
+      log(run, "warn", t("log.backupKept", { path: event.folder, reason: event.reason }));
       break;
     case "finished":
       run.summary = { stats: event.stats, cancelled: event.cancelled, error: event.error };

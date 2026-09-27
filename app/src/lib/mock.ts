@@ -151,6 +151,7 @@ async function simulate(
   dryRun: boolean,
   overwrite: boolean,
   resume: UnfinishedRun | null = null,
+  encrypted = false,
 ) {
   const send = (event: JobEvent) => emit("job-event", event);
   const total: Stats = { deleted: 0, skipped: 0, failed: 0 };
@@ -216,6 +217,7 @@ async function simulate(
           finished,
           filter,
           from_package: false,
+          encrypted_backup: encrypted,
           stats: {
             deleted: prior.deleted + total.deleted,
             skipped: prior.skipped + total.skipped,
@@ -224,8 +226,17 @@ async function simulate(
         }
       : null;
   }
+  if (encrypted) {
+    await send(
+      cancelled
+        ? { type: "backup_kept", folder: "/home/demo/EraseCord backup/erasecord-backup-20260927.parts", reason: "the clean-up was stopped; continue it to finish the backup" }
+        : { type: "backup_sealed", archive: "/home/demo/EraseCord backup/erasecord-backup-20260927-181500.tar.age", files: 23, messages: total.deleted + (resume?.stats.deleted ?? 0) },
+    );
+  }
   await send({ type: "finished", stats: total, cancelled, error: null });
 }
+
+const MOCK_WORDS = "ocean ribbon tiger lemon castle river maple orbit velvet canyon ember harbor quartz meadow falcon pixel".split(" ");
 
 export function installMockBackend() {
   mockIPC(
@@ -314,16 +325,36 @@ export function installMockBackend() {
         case "resume_run": {
           if (!unfinished) throw { kind: "other", message: "nothing to continue" };
           const run = unfinished;
+          if (run.encrypted_backup) {
+            await sleep(600);
+            if (!args.passphrase?.text && !args.passphrase?.file) throw { kind: "other", message: "the backup's passphrase is needed" };
+            if (args.passphrase?.text === "wrong") throw { kind: "other", message: "wrong passphrase, or the file is damaged" };
+          }
           job.paused = false;
           job.cancelled = false;
-          void simulate(run.targets, run.filter, false, false, run);
+          void simulate(run.targets, run.filter, false, false, run, run.encrypted_backup);
           return run;
         }
+        case "plugin:opener|reveal_item_in_dir":
+          return null;
+        case "generate_passphrase":
+          return Array.from({ length: 12 }, () => MOCK_WORDS[Math.floor(Math.random() * MOCK_WORDS.length)]).join(" ");
+        case "open_backup":
+          await sleep(900);
+          if (args.passphrase?.text === "wrong") throw { kind: "other", message: "wrong passphrase, or the file is damaged" };
+          return { folder: args.into, files: 23, messages: 118 };
         case "start_package_job":
         case "start_job":
           job.paused = false;
           job.cancelled = false;
-          void simulate(args.targets, args.filter, args.options.dry_run, args.options.overwrite !== null);
+          void simulate(
+            args.targets,
+            args.filter,
+            args.options.dry_run,
+            args.options.overwrite !== null,
+            null,
+            !!args.options.backup_dir && !!args.backupPassphrase,
+          );
           return null;
         case "pause_job":
           job.paused = true;

@@ -16,6 +16,8 @@
   import { loadPresets, savePresets, snapshot, withPreset, type Preset } from "$lib/presets";
   import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
   import type { LastPackage } from "$lib/lastPackage";
+  import { passphraseProblem, type PassphraseChoice } from "$lib/passphrase";
+  import Passphrase from "./Passphrase.svelte";
   import Avatar from "./Avatar.svelte";
 
   let {
@@ -45,6 +47,9 @@
     content = $bindable(),
     skipPinned = $bindable(),
     options = $bindable(),
+    encrypt = $bindable(),
+    passphrase = $bindable(),
+    onOpenBackup,
     onReload,
     onCount,
   }: {
@@ -74,6 +79,10 @@
     content: ContentForm;
     skipPinned: boolean;
     options: JobOptions;
+    /** Encrypt the backup (the default). */
+    encrypt: boolean;
+    passphrase: PassphraseChoice | null;
+    onOpenBackup: () => void;
     onReload: () => void;
     onCount: () => void;
   } = $props();
@@ -92,7 +101,11 @@
   const allVisibleSelected = $derived(visible.length > 0 && visible.every((t) => selected.has(t.id)));
   const selectedServers = $derived(servers.filter((t) => selected.has(t.id)).length);
   const selectedDms = $derived(dms.filter((t) => selected.has(t.id)).length);
-  const problem = $derived(rangeProblem(range) ?? contentProblem(content));
+  const problem = $derived(
+    rangeProblem(range) ??
+      contentProblem(content) ??
+      (options.backup_dir !== null && encrypt ? (passphrase ? passphraseProblem(passphrase) : t("pass.confirmNeeded")) : null),
+  );
   const summary = $derived(problem ? [] : filterLines(toFilter(range, skipPinned, content)));
   const contentActive = $derived(
     !!content.contains.trim() || !!content.pattern.trim() || content.has.length > 0 || content.without.length > 0,
@@ -556,9 +569,19 @@
             <code title={options.backup_dir}>{options.backup_dir}</code>
             <button type="button" class="link small" onclick={() => chooseBackupFolder()}>{t("setup.backupChange")}</button>
           </span>
-          <span class="small muted">{t("setup.backupHint")}</span>
+          <span class="small muted">{encrypt ? t("setup.backupHintEncrypted") : t("setup.backupHint")}</span>
+          <label class="choice">
+            <input type="checkbox" bind:checked={encrypt} />
+            <span>{t("setup.encrypt")}</span>
+          </label>
+          {#if encrypt && passphrase}
+            <Passphrase bind:choice={passphrase} />
+          {:else if !encrypt}
+            <span class="small warn-text">{t("setup.plainWarning")}</span>
+          {/if}
         </div>
       {/if}
+      <button type="button" class="link small open-backup" onclick={onOpenBackup}>{t("setup.openBackup")}</button>
     </fieldset>
 
     <details>
@@ -928,6 +951,14 @@
   .chip.keep.on {
     background: var(--ok-soft);
     border-color: var(--ok);
+  }
+
+  .warn-text {
+    color: var(--warn);
+  }
+
+  .open-backup {
+    justify-self: start;
   }
 
   .link {

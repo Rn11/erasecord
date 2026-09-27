@@ -6,16 +6,23 @@
   import { formatDuration, targetLabel } from "$lib/format";
   import { i18n, num, t } from "$lib/i18n.svelte";
   import { activeMs, processed, type RunState } from "$lib/run";
+  import { newChoice, passphraseInput, passphraseProblem, type PassphraseChoice } from "$lib/passphrase";
+  import { revealItemInDir } from "@tauri-apps/plugin-opener";
+  import type { PassphraseInput } from "$lib/types";
   import Avatar from "./Avatar.svelte";
+  import Passphrase from "./Passphrase.svelte";
 
   let {
     run,
+    backupPassphrase = null,
     onPause,
     onResume,
     onStop,
     onDone,
   }: {
     run: RunState;
+    /** The passphrase of this run's encrypted backup, reused for its list. */
+    backupPassphrase?: PassphraseInput | null;
     onPause: () => void;
     onResume: () => void;
     onStop: () => void;
@@ -66,21 +73,47 @@
   let exporting = $state(false);
   let exportResult = $state<{ rows: number; path: string } | { error: string } | null>(null);
 
+  // Saving the list: encrypted by default, with the backup's passphrase if
+  // the run had an encrypted backup.
+  let choosing = $state(false);
+  let encryptList = $state(true);
+  let listChoice = $state<PassphraseChoice | null>(null);
+  const listProblem = $derived(
+    encryptList && !backupPassphrase ? (listChoice ? passphraseProblem(listChoice) : t("pass.confirmNeeded")) : null,
+  );
+
+  async function startSaving() {
+    choosing = true;
+    exportResult = null;
+    if (!backupPassphrase && !listChoice) {
+      try {
+        listChoice = newChoice(await api.generatePassphrase());
+      } catch {
+        listChoice = null;
+      }
+    }
+  }
+
   async function exportList() {
     exportResult = null;
     const day = new Date().toISOString().slice(0, 10);
+    const passphrase = encryptList ? (backupPassphrase ?? (listChoice ? passphraseInput(listChoice) : null)) : null;
+    const name = `erasecord-${run.dryRun ? "dry-run" : "deleted"}-${day}.csv${passphrase ? ".age" : ""}`;
     try {
       const path = await save({
         title: t("progress.saveTitle"),
-        defaultPath: `erasecord-${run.dryRun ? "dry-run" : "deleted"}-${day}.csv`,
-        filters: [
-          { name: t("progress.csv"), extensions: ["csv"] },
-          { name: "JSON", extensions: ["json"] },
-        ],
+        defaultPath: name,
+        filters: passphrase
+          ? [{ name: t("progress.encryptedList"), extensions: ["age"] }]
+          : [
+              { name: t("progress.csv"), extensions: ["csv"] },
+              { name: "JSON", extensions: ["json"] },
+            ],
       });
       if (!path) return;
       exporting = true;
-      const rows = await api.exportRun(path);
+      const rows = await api.exportRun(path, passphrase);
+      choosing = false;
       exportResult = { rows, path };
     } catch (err) {
       exportResult = { error: errorMessage(err) };
@@ -103,8 +136,8 @@
         {#if finished}
           <button
             class="btn"
-            onclick={exportList}
-            disabled={exporting || run.totals.deleted === 0}
+            onclick={startSaving}
+            disabled={exporting || choosing || run.totals.deleted === 0}
             title={t("progress.saveHint")}
           >
             {#if exporting}<span class="spinner"></span>{/if} {t("progress.saveList")}
@@ -153,6 +186,40 @@
       </div>
     </div>
 
+    {#if run.backup && "archive" in run.backup}
+      <p class="callout small info backup">
+        <span>{t("progress.backupSealed", { files: num(run.backup.files), messages: num(run.backup.messages) })}</span>
+        <code title={run.backup.archive}>{run.backup.archive}</code>
+        <button class="link" onclick={() => run.backup && "archive" in run.backup && revealItemInDir(run.backup.archive)}>
+          {t("open.show")}
+        </button>
+      </p>
+    {:else if run.backup}
+      <p class="callout small warn">{t("progress.backupKept", { reason: run.backup.reason })}</p>
+    {/if}
+    {#if choosing}
+      <div class="save-panel small">
+        <label class="choice">
+          <input type="checkbox" bind:checked={encryptList} />
+          <span>{t("progress.encryptList")}</span>
+        </label>
+        {#if encryptList && backupPassphrase}
+          <span class="muted">{t("progress.sameAsBackup")}</span>
+        {:else if encryptList && listChoice}
+          <Passphrase bind:choice={listChoice} />
+        {:else if !encryptList}
+          <span class="warn-text">{t("progress.plainList")}</span>
+        {/if}
+        {#if listProblem}<span class="muted">{listProblem}</span>{/if}
+        <div class="save-actions">
+          <button class="btn small ghost" onclick={() => (choosing = false)}>{t("common.cancel")}</button>
+          <button class="btn small primary" onclick={exportList} disabled={exporting || !!listProblem}>
+            {#if exporting}<span class="spinner"></span>{/if}
+            {t("progress.saveList")}
+          </button>
+        </div>
+      </div>
+    {/if}
     {#if exportResult && "error" in exportResult}
       <p class="callout small error">{exportResult.error}</p>
     {:else if exportResult}
@@ -203,6 +270,54 @@
 </div>
 
 <style>
+  .backup {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+  }
+
+  .backup code {
+    font-size: 12px;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+
+  .save-panel {
+    display: grid;
+    gap: 8px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+  }
+
+  .choice {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .warn-text {
+    color: var(--warn);
+  }
+
+  .save-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
   .progress {
     display: grid;
     grid-template-rows: auto 1fr;
