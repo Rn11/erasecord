@@ -212,6 +212,12 @@ export const de: Dictionary = {
   "progress.doneTag": "fertig",
   "progress.activity": "Aktivität",
 
+  "resume.title": "Eine frühere Aufräumaktion wurde nicht beendet.",
+  "resume.detail": "Bisher gelöscht: {messages}. Noch offen: {left} von {total} Servern und Direktnachrichten.",
+  "resume.hint": "Eine neue Aufräumaktion ersetzt sie.",
+  "resume.continue": "Fortsetzen",
+  "resume.discard": "Verwerfen",
+
   "log.searching": "{name} wird durchsucht…",
   "log.deleted": "Gelöscht · {name} · {date} · {preview}",
   "log.wouldDelete": "Würde gelöscht · {name} · {date} · {preview}",

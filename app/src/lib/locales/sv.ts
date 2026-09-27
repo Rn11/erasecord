@@ -211,6 +211,12 @@ export const sv: Dictionary = {
   "progress.doneTag": "klar",
   "progress.activity": "Aktivitet",
 
+  "resume.title": "En tidigare rensning blev inte klar.",
+  "resume.detail": "Raderat hittills: {messages}. Kvar: {left} av {total} servrar och direktmeddelanden.",
+  "resume.hint": "En ny rensning ersätter den.",
+  "resume.continue": "Fortsätt",
+  "resume.discard": "Släng",
+
   "log.searching": "Söker i {name}…",
   "log.deleted": "Raderat · {name} · {date} · {preview}",
   "log.wouldDelete": "Skulle raderas · {name} · {date} · {preview}",

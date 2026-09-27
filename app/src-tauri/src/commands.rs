@@ -4,10 +4,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry};
+use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
     Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
-    PackageTarget, Snowflake, Target, TargetKind, User,
+    PackageTarget, SavedRun, Snowflake, Target, TargetKind, User,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -221,7 +221,7 @@ pub async fn start_job(
     filter: Filter,
     options: JobOptions,
 ) -> CommandResult<()> {
-    spawn_job(app, &state, None, targets, filter, options)
+    spawn_job(app, &state, None, targets, filter, options, None)
 }
 
 /// Like [`start_job`], with the messages of the imported data package.
@@ -234,18 +234,37 @@ pub async fn start_package_job(
     options: JobOptions,
 ) -> CommandResult<()> {
     let package = state.package().ok_or_else(CommandError::no_package)?;
-    spawn_job(app, &state, Some(package), targets, filter, options)
+    spawn_job(app, &state, Some(package), targets, filter, options, None)
 }
 
+/// Starts a clean-up. `saved` continues an earlier one. Real runs keep their
+/// progress in [`run_state_file`], so they can be continued after a stop or
+/// a crash; the file is removed once everything is done.
 fn spawn_job(
     app: AppHandle,
     state: &AppState,
-    package: Option<Arc<Package>>,
+    package: Option<(Arc<Package>, PathBuf)>,
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
+    saved: Option<SavedRun>,
 ) -> CommandResult<()> {
     let session = state.session()?;
+    let state_file = run_state_file(&app);
+    let mut saved = if options.dry_run {
+        None
+    } else {
+        Some(saved.unwrap_or_else(|| {
+            let path = package.as_ref().map(|(_, path)| path.as_path());
+            SavedRun::new(&targets, &filter, &options, path)
+        }))
+    };
+    if let (Some(file), Some(saved)) = (&state_file, &saved) {
+        saved.save(file).map_err(|err| {
+            CommandError::other(format!("cannot save the progress of the clean-up: {err}"))
+        })?;
+    }
+    let package = package.map(|(package, _)| package);
     // The list of messages next to the backed-up files; created before the
     // run, so a folder that cannot be written stops it before anything is
     // deleted.
@@ -273,8 +292,23 @@ fn spawn_job(
             }
         };
         let forward = async {
+            let mut unsaved = 0;
             while let Some(event) = rx.recv().await {
                 app.state::<AppState>().record(&event);
+                if let (Some(file), Some(saved)) = (&state_file, saved.as_mut()) {
+                    saved.checkpoint.observe(&event);
+                    unsaved += 1;
+                    if let Event::Finished(summary) = &event {
+                        if summary.error.is_none() && !summary.cancelled {
+                            let _ = std::fs::remove_file(file);
+                        } else {
+                            let _ = saved.save(file);
+                        }
+                    } else if unsaved >= STATE_SAVE_EVERY {
+                        unsaved = 0;
+                        let _ = saved.save(file);
+                    }
+                }
                 if let Some(list) = backup_list.as_mut() {
                     // A broken list must not stop the run; the files are saved.
                     if list.observe(&event).is_err() {
@@ -297,6 +331,85 @@ fn spawn_job(
         tokio::join!(run, forward);
     });
     Ok(())
+}
+
+/// How often the progress file is written, in events.
+const STATE_SAVE_EVERY: u32 = 20;
+
+fn run_state_file(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .app_data_dir()
+        .ok()
+        .map(|dir| dir.join("unfinished-run.json"))
+}
+
+/// What the app shows about a clean-up that did not finish.
+#[derive(Serialize)]
+pub struct UnfinishedRun {
+    targets: Vec<Target>,
+    finished: Vec<Snowflake>,
+    stats: Stats,
+    from_package: bool,
+}
+
+impl UnfinishedRun {
+    fn of(saved: &SavedRun) -> Self {
+        UnfinishedRun {
+            targets: saved.targets.clone(),
+            finished: saved.checkpoint.finished.clone(),
+            stats: saved.checkpoint.stats,
+            from_package: saved.package.is_some(),
+        }
+    }
+}
+
+/// The clean-up that was stopped or cut short, if there is one.
+#[tauri::command]
+pub fn unfinished_run(app: AppHandle) -> Option<UnfinishedRun> {
+    let saved = SavedRun::load(&run_state_file(&app)?).ok()?;
+    Some(UnfinishedRun::of(&saved))
+}
+
+/// Continues the unfinished clean-up, with exactly its servers, DMs and
+/// conditions. Progress arrives as [`JOB_EVENT`]s.
+#[tauri::command]
+pub async fn resume_run(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CommandResult<UnfinishedRun> {
+    let file =
+        run_state_file(&app).ok_or_else(|| CommandError::other("no app data folder".into()))?;
+    let saved = SavedRun::load(&file).map_err(|err| {
+        CommandError::other(format!("cannot read the unfinished clean-up: {err}"))
+    })?;
+    let session = state.session()?;
+    let package = match &saved.package {
+        Some(path) => {
+            let source = path.clone();
+            let package = tauri::async_runtime::spawn_blocking(move || Package::open(&source))
+                .await
+                .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
+            package.check_owner(session.me.id)?;
+            Some((Arc::new(package), path.clone()))
+        }
+        None => None,
+    };
+    let info = UnfinishedRun::of(&saved);
+    let (targets, filter, options) = (
+        saved.targets.clone(),
+        saved.filter.clone(),
+        saved.resume_options(),
+    );
+    spawn_job(app, &state, package, targets, filter, options, Some(saved))?;
+    Ok(info)
+}
+
+/// Forgets the unfinished clean-up.
+#[tauri::command]
+pub fn discard_run(app: AppHandle) {
+    if let Some(file) = run_state_file(&app) {
+        let _ = std::fs::remove_file(file);
+    }
 }
 
 type ListWriter = ExportWriter<std::io::BufWriter<std::fs::File>>;
@@ -345,7 +458,8 @@ pub async fn import_package(
     path: PathBuf,
 ) -> CommandResult<PackageSummary> {
     let session = state.session()?;
-    let package = tauri::async_runtime::spawn_blocking(move || Package::open(&path))
+    let source = path.clone();
+    let package = tauri::async_runtime::spawn_blocking(move || Package::open(&source))
         .await
         .map_err(|err| CommandError::from(Error::Package(err.to_string())))??;
     package.check_owner(session.me.id)?;
@@ -381,7 +495,7 @@ pub async fn import_package(
         targets,
         left_servers,
     };
-    state.set_package(Some(Arc::new(package)));
+    state.set_package(Some((Arc::new(package), path)));
     Ok(summary)
 }
 
@@ -398,7 +512,7 @@ pub async fn preview_package(
     filter: Filter,
 ) -> CommandResult<Vec<PreviewEntry>> {
     let session = state.session()?;
-    let package = state.package().ok_or_else(CommandError::no_package)?;
+    let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
     Ok(job::preview_package(
         &package,
         session.me.id,

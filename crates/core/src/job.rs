@@ -20,6 +20,7 @@ pub use crate::filter::Filter;
 use crate::filter::Matcher;
 use crate::models::Message;
 use crate::package::Package;
+use crate::resume::Checkpoint;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
 use crate::targets::Target;
@@ -44,6 +45,8 @@ pub struct JobOptions {
     /// message whose attachments cannot be saved is not deleted. Also done in
     /// a dry run, which then backs up without deleting anything.
     pub backup_dir: Option<PathBuf>,
+    /// Continue an earlier run: skip what it finished and dealt with.
+    pub resume: Option<Checkpoint>,
 }
 
 impl Default for JobOptions {
@@ -55,6 +58,7 @@ impl Default for JobOptions {
             dry_run: false,
             overwrite: None,
             backup_dir: None,
+            resume: None,
         }
     }
 }
@@ -145,6 +149,8 @@ pub enum Event {
     TargetFinished {
         target_id: Snowflake,
         stats: Stats,
+        /// False when the target was interrupted or could not be searched.
+        complete: bool,
     },
     Notice {
         notice: Notice,
@@ -413,6 +419,9 @@ async fn run_from(
     let mut total = Stats::default();
     let mut stopped_by = None;
     for (index, target) in targets.iter().enumerate() {
+        if job.resume().is_some_and(|r| r.is_finished(target.id)) {
+            continue;
+        }
         job.emit(Event::TargetStarted {
             index,
             target_id: target.id,
@@ -424,6 +433,7 @@ async fn run_from(
             Source::Package(package) => job.purge_known(target, package, &mut stats).await,
         };
         total.add(stats);
+        let complete = result.is_ok();
         match result {
             Ok(()) => {}
             Err(err @ (Error::Unauthorized | Error::Cancelled)) => stopped_by = Some(err),
@@ -435,6 +445,7 @@ async fn run_from(
         job.emit(Event::TargetFinished {
             target_id: target.id,
             stats,
+            complete,
         });
         if stopped_by.is_some() {
             break;
@@ -466,6 +477,15 @@ struct Job<'a> {
 }
 
 impl Job<'_> {
+    fn resume(&self) -> Option<&Checkpoint> {
+        self.options.resume.as_ref()
+    }
+
+    /// Dealt with by the run being continued.
+    fn already_done(&self, id: Snowflake) -> bool {
+        self.resume().is_some_and(|r| r.done.contains(&id))
+    }
+
     fn emit(&self, event: Event) {
         // The receiver only goes away when nobody watches the job any more.
         let _ = self.events.send(event);
@@ -479,8 +499,17 @@ impl Job<'_> {
         let scope = target.scope();
         let mut seen = HashSet::new();
         let mut searched = false;
-        for _ in 0..self.options.max_rounds.max(1) {
-            let mut cursor = self.query.max_id;
+        // A continued run starts below the oldest message it dealt with;
+        // later rounds start from the top again, as always.
+        let resume_cursor = self
+            .resume()
+            .and_then(|r| r.cursors.get(&target.id))
+            .copied();
+        for round in 0..self.options.max_rounds.max(1) {
+            let mut cursor = match (round, resume_cursor) {
+                (0, Some(resume)) => Some(self.query.max_id.map_or(resume, |max| max.min(resume))),
+                _ => self.query.max_id,
+            };
             let mut new_messages = 0;
             loop {
                 if searched {
@@ -509,7 +538,7 @@ impl Job<'_> {
                     break;
                 };
                 for message in hits {
-                    if seen.insert(message.id) {
+                    if seen.insert(message.id) && !self.already_done(message.id) {
                         new_messages += 1;
                         self.handle(target, message, stats).await?;
                     }
@@ -544,7 +573,7 @@ impl Job<'_> {
                 let messages: Vec<Message> = channel
                     .messages
                     .iter()
-                    .filter(|m| self.filter.contains(m.id))
+                    .filter(|m| self.filter.contains(m.id) && !self.already_done(m.id))
                     .map(|m| m.to_message(channel.id, self.me))
                     .filter(|m| self.matcher.matches(m))
                     .collect();

@@ -211,6 +211,12 @@ export const es: Dictionary = {
   "progress.doneTag": "terminado",
   "progress.activity": "Actividad",
 
+  "resume.title": "Una limpieza anterior no terminó.",
+  "resume.detail": "Borrados hasta ahora: {messages}. Pendientes: {left} de {total} servidores y mensajes directos.",
+  "resume.hint": "Empezar una nueva limpieza la reemplaza.",
+  "resume.continue": "Continuar",
+  "resume.discard": "Descartar",
+
   "log.searching": "Buscando en {name}…",
   "log.deleted": "Borrado · {name} · {date} · {preview}",
   "log.wouldDelete": "Se borraría · {name} · {date} · {preview}",

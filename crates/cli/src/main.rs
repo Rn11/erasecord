@@ -12,7 +12,7 @@ use clap::{Args, Parser, Subcommand};
 use erasecord_core::job::{self, Event, Filter, JobControl, JobOptions, PreviewEntry, Stats};
 use erasecord_core::{
     friends_without_dm, list_channels, list_targets, open_dm, Client, ClientConfig, ExportFormat,
-    ExportWriter, Has, Notice, Package, PackageTarget, Snowflake, Target, TargetKind,
+    ExportWriter, Has, Notice, Package, PackageTarget, SavedRun, Snowflake, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 
@@ -72,6 +72,16 @@ enum Command {
         content: Content,
         #[command(flatten)]
         options: DeleteOptions,
+    },
+    /// Continue a clean-up that was started with `delete --state FILE` and did not
+    /// finish, with exactly the servers, DMs and conditions it had.
+    Resume {
+        /// The state file given to `delete --state`.
+        #[arg(value_name = "FILE")]
+        file: PathBuf,
+        /// Print every deleted or skipped message.
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -158,6 +168,10 @@ struct DeleteOptions {
     /// With --dry-run this only backs up.
     #[arg(long, value_name = "DIR")]
     backup: Option<PathBuf>,
+    /// Keep track of the progress in FILE, so that a run that is stopped or cut short can be
+    /// continued with `erasecord resume FILE`. The file is removed once everything is done.
+    #[arg(long, value_name = "FILE")]
+    state: Option<PathBuf>,
     /// Pause after each deletion, in milliseconds.
     #[arg(long, value_name = "MS", default_value_t = JobOptions::default().delete_delay_ms)]
     delete_delay: u64,
@@ -192,14 +206,16 @@ impl Command {
             Command::Preview { selection, .. } | Command::Delete { selection, .. } => {
                 selection.package.as_deref()
             }
-            Command::Channels { .. } => None,
+            Command::Channels { .. } | Command::Resume { .. } => None,
         }
     }
 
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
-            Command::List { .. } | Command::Channels { .. } => return Ok(()),
+            Command::List { .. } | Command::Channels { .. } | Command::Resume { .. } => {
+                return Ok(())
+            }
             Command::Preview {
                 selection,
                 range,
@@ -210,7 +226,12 @@ impl Command {
                 range,
                 content,
                 options,
-            } => (selection, range, content, !options.dry_run && !options.yes),
+            } => {
+                if options.state.is_some() && options.dry_run {
+                    bail!("--state is for real runs; a dry run has nothing to continue");
+                }
+                (selection, range, content, !options.dry_run && !options.yes)
+            }
         };
         if selection.targets.is_empty()
             && selection.channels.is_empty()
@@ -391,18 +412,67 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     return Ok(ExitCode::SUCCESS);
                 }
             }
+            let state = match &options.state {
+                Some(file) => {
+                    // Absolute, so `resume` works from any folder.
+                    let package_path = match &selection.package {
+                        Some(path) => Some(std::fs::canonicalize(path)?),
+                        None => None,
+                    };
+                    let saved =
+                        SavedRun::new(&targets, &filter, &job_options, package_path.as_deref());
+                    Some((file.clone(), saved))
+                }
+                None => None,
+            };
             graceful.store(true, Ordering::SeqCst);
-            delete(
+            delete(Plan {
                 client,
                 me,
                 package,
                 targets,
                 filter,
-                job_options,
+                options: job_options,
                 control,
-                options.verbose,
-                options.export.as_deref(),
-            )
+                verbose: options.verbose,
+                export: options.export,
+                state,
+            })
+            .await
+        }
+        Command::Resume { file, verbose } => {
+            let (client, me) = online();
+            let saved = SavedRun::load(&file)
+                .with_context(|| format!("cannot read the state file {}", file.display()))?;
+            let package = match &saved.package {
+                Some(path) => {
+                    let package = load_package(path)?;
+                    package
+                        .check_owner(me)
+                        .context("cannot use this data package")?;
+                    Some(Arc::new(package))
+                }
+                None => None,
+            };
+            eprintln!(
+                "Continuing: {} of {} server(s)/DM(s) left, {} message(s) deleted so far.",
+                saved.remaining(),
+                saved.targets.len(),
+                saved.checkpoint.stats.deleted
+            );
+            graceful.store(true, Ordering::SeqCst);
+            delete(Plan {
+                client,
+                me,
+                package,
+                targets: saved.targets.clone(),
+                filter: saved.filter.clone(),
+                options: saved.resume_options(),
+                control,
+                verbose,
+                export: None,
+                state: Some((file, saved)),
+            })
             .await
         }
     }
@@ -648,7 +718,8 @@ fn confirm(total: u64) -> Result<bool> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn delete(
+/// A clean-up to run.
+struct Plan {
     client: Client,
     me: Snowflake,
     package: Option<Arc<Package>>,
@@ -657,8 +728,33 @@ async fn delete(
     options: JobOptions,
     control: JobControl,
     verbose: bool,
-    export: Option<&Path>,
-) -> Result<ExitCode> {
+    export: Option<PathBuf>,
+    /// Where to keep track of the progress, and what is known so far.
+    state: Option<(PathBuf, SavedRun)>,
+}
+
+/// How often the state file is written, in events.
+const STATE_SAVE_EVERY: u32 = 20;
+
+async fn delete(plan: Plan) -> Result<ExitCode> {
+    let Plan {
+        client,
+        me,
+        package,
+        targets,
+        filter,
+        options,
+        control,
+        verbose,
+        export,
+        mut state,
+    } = plan;
+    let export = export.as_deref();
+    if let Some((file, saved)) = &state {
+        saved
+            .save(file)
+            .with_context(|| format!("cannot write the state file {}", file.display()))?;
+    }
     // Created before anything is deleted, so a bad path costs nothing.
     let backup_list = match &options.backup_dir {
         Some(dir) => {
@@ -692,8 +788,19 @@ async fn delete(
     });
 
     let mut progress = Progress::new(target_count, verbose || dry_run, dry_run);
+    let mut unsaved = 0;
     while let Some(event) = rx.recv().await {
         progress.handle(&event);
+        if let Some((file, saved)) = &mut state {
+            saved.checkpoint.observe(&event);
+            unsaved += 1;
+            if unsaved >= STATE_SAVE_EVERY {
+                unsaved = 0;
+                saved
+                    .save(file)
+                    .with_context(|| format!("cannot write the state file {}", file.display()))?;
+            }
+        }
         for (path, exporter) in &mut exporters {
             exporter
                 .observe(&event)
@@ -713,6 +820,18 @@ async fn delete(
         "Done: {} {}, {} skipped, {} failed.",
         summary.stats.deleted, progress.deleted_label, summary.stats.skipped, summary.stats.failed
     );
+    if let Some((file, saved)) = &state {
+        let complete = summary.error.is_none() && !summary.cancelled;
+        if complete {
+            let _ = std::fs::remove_file(file);
+            println!("Everything is done; removed {}.", file.display());
+        } else {
+            saved
+                .save(file)
+                .with_context(|| format!("cannot write the state file {}", file.display()))?;
+            println!("To continue later: erasecord resume {}", file.display());
+        }
+    }
     if let Some(error) = summary.error {
         bail!("stopped early: {error}");
     }

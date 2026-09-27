@@ -139,11 +139,19 @@ export type JobEvent =
   | { type: "failed"; target_id: Snowflake; message_id: Snowflake; error: string }
   | { type: "target_failed"; target_id: Snowflake; error: string }
   | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
-  | { type: "target_finished"; target_id: Snowflake; stats: Stats }
+  | { type: "target_finished"; target_id: Snowflake; stats: Stats; complete: boolean }
   | { type: "notice"; notice: Notice }
   | ({ type: "finished" } & Summary);
 
 export interface CommandError {
   kind: "unauthorized" | "cancelled" | "busy" | "not_logged_in" | "no_package" | "other";
   message: string;
+}
+
+/** A clean-up that was stopped or cut short and can be continued. */
+export interface UnfinishedRun {
+  targets: Target[];
+  finished: Snowflake[];
+  stats: Stats;
+  from_package: boolean;
 }

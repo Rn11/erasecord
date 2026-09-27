@@ -1,6 +1,7 @@
 //! What the app keeps between commands: the logged-in session, the running
 //! job, and the remembered token.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use erasecord_core::{Client, Event, JobControl, Package, User};
@@ -20,7 +21,7 @@ pub struct AppState {
     job: Mutex<Option<JobControl>>,
     /// The imported data package, if any. Kept here: it is too big to send
     /// to the web view.
-    package: Mutex<Option<Arc<Package>>>,
+    package: Mutex<Option<(Arc<Package>, PathBuf)>>,
     /// The events of the last clean-up that an export needs: names and
     /// deleted messages.
     last_run: Mutex<Vec<Event>>,
@@ -71,11 +72,12 @@ impl AppState {
         self.last_run.lock().unwrap().clone()
     }
 
-    pub fn package(&self) -> Option<Arc<Package>> {
+    /// The imported package and where it was read from.
+    pub fn package(&self) -> Option<(Arc<Package>, PathBuf)> {
         self.package.lock().unwrap().clone()
     }
 
-    pub fn set_package(&self, package: Option<Arc<Package>>) {
+    pub fn set_package(&self, package: Option<(Arc<Package>, PathBuf)>) {
         *self.package.lock().unwrap() = package;
     }
 }

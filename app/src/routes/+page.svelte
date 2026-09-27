@@ -6,7 +6,7 @@
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onPreviewEntry } from "$lib/api";
   import { errorMessage } from "$lib/errors";
-  import { applyDocumentLanguage, t } from "$lib/i18n.svelte";
+  import { applyDocumentLanguage, num, t } from "$lib/i18n.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import {
     contentProblem,
@@ -26,6 +26,7 @@
     PackageSummary,
     PreviewEntry,
     Target,
+    UnfinishedRun,
     User,
   } from "$lib/types";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -70,6 +71,8 @@
   let previewError = $state<string | null>(null);
 
   let run = $state<RunState | null>(null);
+  /** A clean-up that was stopped or cut short and can be continued. */
+  let unfinished = $state<UnfinishedRun | null>(null);
 
   const shownTargets = $derived(pkg ? pkg.targets.map((t) => t.target) : targets);
   const selectedTargets = $derived(
@@ -121,7 +124,37 @@
     user = loggedIn;
     notice = rememberError ? t("page.rememberFailed", { error: rememberError }) : null;
     screen = "setup";
-    await loadTargets();
+    await Promise.all([loadTargets(), checkUnfinished()]);
+  }
+
+  async function checkUnfinished() {
+    try {
+      unfinished = await api.unfinishedRun();
+    } catch {
+      unfinished = null;
+    }
+  }
+
+  async function continueRun() {
+    if (!unfinished) return;
+    const from = $state.snapshot(unfinished);
+    unfinished = null;
+    run = newRun(from.targets, 0, false, { finished: from.finished, stats: from.stats });
+    screen = "progress";
+    try {
+      await api.resumeRun();
+    } catch (err) {
+      const message = fail(err);
+      if (message && run) {
+        run.summary = { stats: run.totals, cancelled: false, error: message };
+        run.finishedAt = Date.now();
+      }
+    }
+  }
+
+  async function discardRun() {
+    await api.discardRun();
+    unfinished = null;
   }
 
   async function loadTargets() {
@@ -275,6 +308,8 @@
 
   async function start(dryRun: boolean) {
     // Places without matches need no work; failed searches get another try.
+    // A new real run replaces the unfinished one.
+    if (!dryRun) unfinished = null;
     const runTargets = entries.filter((e) => e.count !== 0).map((e) => e.target);
     const expected = entries.reduce((sum, e) => sum + (e.count ?? 0), 0);
     run = newRun($state.snapshot(runTargets), expected, dryRun);
@@ -308,7 +343,7 @@
   async function finish() {
     run = null;
     screen = "setup";
-    await loadTargets();
+    await Promise.all([loadTargets(), checkUnfinished()]);
   }
 </script>
 
@@ -331,6 +366,23 @@
   {/if}
 
   <main class:padded={screen !== "login" && screen !== "starting"}>
+    {#if screen === "setup" && unfinished}
+      <div class="callout warn small notice resume">
+        <span>
+          <strong>{t("resume.title")}</strong>
+          {t("resume.detail", {
+            messages: t("count.message", { count: unfinished.stats.deleted }),
+            left: num(unfinished.targets.length - unfinished.finished.length),
+            total: num(unfinished.targets.length),
+          })}
+          <span class="muted">{t("resume.hint")}</span>
+        </span>
+        <span class="resume-actions">
+          <button class="btn small" onclick={discardRun}>{t("resume.discard")}</button>
+          <button class="btn primary small" onclick={continueRun}>{t("resume.continue")}</button>
+        </span>
+      </div>
+    {/if}
     {#if notice && user}
       <div class="callout info small notice">
         <span>{notice}</span>
@@ -444,6 +496,12 @@
     justify-content: space-between;
     gap: 8px;
     flex: none !important;
+  }
+
+  .resume-actions {
+    display: flex;
+    gap: 6px;
+    flex: none;
   }
 
   .starting {

@@ -13,6 +13,7 @@ import type {
   PreviewEntry,
   Stats,
   Target,
+  UnfinishedRun,
   User,
 } from "./types";
 
@@ -109,11 +110,22 @@ async function checkpoint(): Promise<boolean> {
   return !job.cancelled;
 }
 
-async function simulate(selected: Target[], filter: Filter, dryRun: boolean, overwrite: boolean) {
+/** A stopped mock run, to try "Continue" in the browser. */
+let unfinished: (UnfinishedRun & { filter: Filter }) | null = null;
+
+async function simulate(
+  selected: Target[],
+  filter: Filter,
+  dryRun: boolean,
+  overwrite: boolean,
+  resume: UnfinishedRun | null = null,
+) {
   const send = (event: JobEvent) => emit("job-event", event);
   const total: Stats = { deleted: 0, skipped: 0, failed: 0 };
+  const finished = [...(resume?.finished ?? [])];
   let cancelled = false;
   for (const [index, target] of selected.entries()) {
+    if (finished.includes(target.id)) continue;
     await send({ type: "target_started", index, target_id: target.id, name: target.name });
     const count = countFor(target, filter);
     await send({ type: "target_estimate", target_id: target.id, total: count });
@@ -160,8 +172,25 @@ async function simulate(selected: Target[], filter: Filter, dryRun: boolean, ove
     total.deleted += stats.deleted;
     total.skipped += stats.skipped;
     total.failed += stats.failed;
-    await send({ type: "target_finished", target_id: target.id, stats });
+    await send({ type: "target_finished", target_id: target.id, stats, complete: !cancelled });
+    if (!cancelled) finished.push(target.id);
     if (cancelled) break;
+  }
+  if (!dryRun) {
+    const prior = resume?.stats ?? { deleted: 0, skipped: 0, failed: 0 };
+    unfinished = cancelled
+      ? {
+          targets: selected,
+          finished,
+          filter,
+          from_package: false,
+          stats: {
+            deleted: prior.deleted + total.deleted,
+            skipped: prior.skipped + total.skipped,
+            failed: prior.failed + total.failed,
+          },
+        }
+      : null;
   }
   await send({ type: "finished", stats: total, cancelled, error: null });
 }
@@ -235,6 +264,19 @@ export function installMockBackend() {
             if (args.filter.content || args.filter.has.length) count = Math.round(count * 0.15);
             return { target, count, error: null };
           });
+        case "unfinished_run":
+          return unfinished;
+        case "discard_run":
+          unfinished = null;
+          return null;
+        case "resume_run": {
+          if (!unfinished) throw { kind: "other", message: "nothing to continue" };
+          const run = unfinished;
+          job.paused = false;
+          job.cancelled = false;
+          void simulate(run.targets, run.filter, false, false, run);
+          return run;
+        }
         case "start_package_job":
         case "start_job":
           job.paused = false;

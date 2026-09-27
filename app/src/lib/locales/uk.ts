@@ -248,6 +248,12 @@ export const uk: Dictionary = {
   "progress.doneTag": "готово",
   "progress.activity": "Журнал",
 
+  "resume.title": "Попереднє очищення не завершилося.",
+  "resume.detail": "Уже видалено: {messages}. Залишилося: {left} з {total} серверів і розмов.",
+  "resume.hint": "Нове очищення замінить його.",
+  "resume.continue": "Продовжити",
+  "resume.discard": "Відкинути",
+
   "log.searching": "Пошук у {name}…",
   "log.deleted": "Видалено · {name} · {date} · {preview}",
   "log.wouldDelete": "Буде видалено · {name} · {date} · {preview}",

@@ -5,8 +5,8 @@ use std::time::Duration;
 use common::*;
 use erasecord_core::package::{PackageChannel, PackageMessage};
 use erasecord_core::{
-    job, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake, Summary,
-    Target, TargetKind,
+    job, Checkpoint, Event, Filter, Has, JobControl, JobOptions, Package, SkipReason, Snowflake,
+    Summary, Target, TargetKind,
 };
 use tokio::sync::mpsc;
 use wiremock::matchers::any;
@@ -870,4 +870,153 @@ async fn dry_run_with_a_backup_only_saves() {
         .path()
         .join(format!("attachments/{DM_CHANNEL}/{}_1_cat.png", photo.id));
     assert!(saved.exists());
+}
+
+/// Starts a run, stops it once `stop_after` messages were deleted and
+/// returns its events.
+async fn stopped_run(
+    fake: &FakeDiscord,
+    package: Option<&Package>,
+    targets: &[Target],
+    filter: &Filter,
+    stop_after: usize,
+) -> Vec<Event> {
+    let control = JobControl::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let options = JobOptions {
+        delete_delay_ms: 30,
+        ..fast()
+    };
+    let (client, targets, filter) = (fake.client(), targets.to_vec(), filter.clone());
+    let package = package.cloned();
+    let task = {
+        let control = control.clone();
+        tokio::spawn(async move {
+            match package {
+                Some(package) => {
+                    job::run_package(
+                        &client,
+                        Snowflake(ME),
+                        &package,
+                        &targets,
+                        &filter,
+                        &options,
+                        &control,
+                        tx,
+                    )
+                    .await
+                }
+                None => {
+                    job::run(
+                        &client,
+                        Snowflake(ME),
+                        &targets,
+                        &filter,
+                        &options,
+                        &control,
+                        tx,
+                    )
+                    .await
+                }
+            }
+        })
+    };
+    wait_until("enough was deleted", || fake.delete_calls() >= stop_after).await;
+    control.cancel();
+    let summary = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(summary.cancelled);
+    let mut events = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        events.push(event);
+    }
+    events
+}
+
+fn checkpoint_of(events: &[Event]) -> Checkpoint {
+    let mut checkpoint = Checkpoint::default();
+    for event in events {
+        checkpoint.observe(event);
+    }
+    checkpoint
+}
+
+#[tokio::test]
+async fn a_stopped_run_can_be_continued() {
+    let mut messages: Vec<FakeMessage> = (0..40)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    for minute in [5, 20, 35] {
+        messages.push(FakeMessage {
+            pinned: true,
+            ..FakeMessage::in_dm(minute, 1)
+        });
+    }
+    // Message IDs are unique across Discord, so not the same as a DM message.
+    messages.push(FakeMessage::in_guild(0, 9, ME));
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let filter = Filter {
+        skip_pinned: true,
+        ..Default::default()
+    };
+    let targets = [guild_target(), dm_target()];
+
+    let first = stopped_run(&fake, None, &targets, &filter, 12).await;
+    let mut checkpoint = checkpoint_of(&first);
+    // The server was done before the stop; the DM was interrupted.
+    assert_eq!(checkpoint.finished, [Snowflake(GUILD)]);
+    let deleted_before = checkpoint.stats.deleted;
+    let skipped_before = checkpoint.stats.skipped;
+
+    let options = JobOptions {
+        resume: Some(checkpoint.clone()),
+        ..fast()
+    };
+    let (summary, events) = run_job(&fake, &targets, filter, options).await;
+    for event in &events {
+        checkpoint.observe(event);
+    }
+
+    assert!(!summary.cancelled && summary.error.is_none());
+    // The finished server is not searched again.
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::TargetStarted { target_id, .. } if target_id.0 == GUILD)));
+    // Every message was deleted exactly once, every pin reported once.
+    assert_eq!(checkpoint.stats.deleted, 41);
+    assert_eq!(checkpoint.stats.skipped, 3);
+    assert_eq!(summary.stats.deleted, 41 - deleted_before);
+    assert_eq!(summary.stats.skipped, 3 - skipped_before);
+    assert_eq!(fake.delete_calls(), 41);
+    assert_eq!(fake.remaining().len(), 3);
+}
+
+#[tokio::test]
+async fn a_stopped_package_run_can_be_continued() {
+    let messages: Vec<FakeMessage> = (0..30)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let package = package_of(&messages);
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let targets: Vec<Target> = package.targets().into_iter().map(|t| t.target).collect();
+
+    let first = stopped_run(&fake, Some(&package), &targets, &Filter::default(), 10).await;
+    let checkpoint = checkpoint_of(&first);
+    let options = JobOptions {
+        resume: Some(checkpoint.clone()),
+        ..fast()
+    };
+    let (summary, events) =
+        run_package_job(&fake, &package, &targets, Filter::default(), options).await;
+
+    assert_eq!(checkpoint.stats.deleted + summary.stats.deleted, 30);
+    // Already deleted messages are not tried again (they would count twice).
+    assert_eq!(fake.delete_calls(), 30);
+    assert!(fake.remaining().is_empty());
+    let remaining = 30 - checkpoint.stats.deleted;
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::TargetEstimate { total, .. } if *total == remaining)));
 }

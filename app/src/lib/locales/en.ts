@@ -211,6 +211,12 @@ export const en = {
   "progress.doneTag": "done",
   "progress.activity": "Activity",
 
+  "resume.title": "An earlier clean-up did not finish.",
+  "resume.detail": "Deleted so far: {messages}. Still to do: {left} of {total} servers and DMs.",
+  "resume.hint": "Starting a new clean-up replaces it.",
+  "resume.continue": "Continue",
+  "resume.discard": "Discard",
+
   "log.searching": "Searching {name}…",
   "log.deleted": "Deleted · {name} · {date} · {preview}",
   "log.wouldDelete": "Would delete · {name} · {date} · {preview}",
