@@ -26,7 +26,16 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "nsis",
+      "deb",
+      "rpm",
+      "appimage",
+      "app",
+      "dmg"
+    ],
+    "publisher": "EraseCord",
+    "homepage": "https://github.com/Rn11/erasecord",
     "category": "Utility",
     "shortDescription": "Delete your own Discord messages",
     "longDescription": "EraseCord deletes your own Discord messages from the servers and direct messages you choose, within a time range you choose.",
@@ -36,6 +45,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh"
+      }
+    }
   }
 }

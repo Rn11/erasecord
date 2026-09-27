@@ -41,7 +41,7 @@ want. Open source, for Windows, macOS and Linux, as a desktop app and as a comma
 ## Install
 
 Download the installer for your system from the [releases page](https://github.com/Rn11/erasecord/releases):
-`.msi`/`.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
+`-setup.exe` for Windows, `.dmg` for macOS, `.AppImage`, `.deb` or `.rpm` for Linux. The command line tool is
 attached to every release as a single binary.
 
 The builds are not code-signed yet:
@@ -49,6 +49,16 @@ The builds are not code-signed yet:
 - **macOS:** right-click the app and choose *Open*, or run `xattr -d com.apple.quarantine /Applications/EraseCord.app`.
 - **Windows:** in the SmartScreen dialog choose *More info → Run anyway*.
 - **Linux (AppImage):** `chmod +x EraseCord_*.AppImage` and run it.
+
+### Uninstall
+
+- **Windows:** *Settings → Apps → Installed apps*, search for *EraseCord*, then *⋯ → Uninstall*. The installer puts
+  the app in `%LOCALAPPDATA%\EraseCord`, so running `%LOCALAPPDATA%\EraseCord\uninstall.exe` works too. Version
+  0.2.0 also came as an `.msi`; if you installed that one, it is listed as well, or run
+  `msiexec /x EraseCord_0.2.0_x64_en-US.msi` in the folder you downloaded it to. The uninstaller offers to delete
+  your settings too; a remembered token is removed when you log out.
+- **macOS:** move *EraseCord* from *Applications* to the Bin.
+- **Linux:** `sudo apt remove erase-cord` or `sudo dnf remove erase-cord`, or delete the AppImage.
 
 ## Finding your token
 
