@@ -174,7 +174,9 @@ pub async fn list_targets(
 ) -> CommandResult<Vec<Target>> {
     let session = state.session()?;
     if refresh == Some(true) {
+        // Asking Discord again means for the messages too.
         state.forget_lists();
+        state.messages.clear();
     } else if let Some(targets) = state.cached_targets() {
         return Ok(targets);
     }
@@ -228,18 +230,28 @@ pub async fn start_scan(
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
+    scan_id: u64,
 ) -> CommandResult<()> {
     let session = state.session()?;
+    if state.job().is_some() {
+        return Err(CommandError::busy());
+    }
     filter.compile()?;
     let (control, done) = state.begin_scan().await;
     let cache = state.messages.clone();
     tauri::async_runtime::spawn(async move {
-        let emit = |event: ScanEvent| {
-            let _ = app.emit(SCAN_EVENT, &event);
+        // Every event names its count, so the UI can ignore late events of
+        // one it has left.
+        let send = move |app: &AppHandle, event: &ScanEvent| {
+            if let Ok(serde_json::Value::Object(mut map)) = serde_json::to_value(event) {
+                map.insert("scan_id".into(), scan_id.into());
+                let _ = app.emit(SCAN_EVENT, map);
+            }
         };
+        let emit = |event: ScanEvent| send(&app, &event);
         let notices = app.clone();
         session.client.set_notice_sink(Some(Arc::new(move |notice| {
-            let _ = notices.emit(SCAN_EVENT, &ScanEvent::Notice { notice });
+            send(&notices, &ScanEvent::Notice { notice });
         })));
         let result = scan::scan(
             &session.client,
@@ -260,7 +272,12 @@ pub async fn start_scan(
         };
         let _ = app.emit(
             SCAN_EVENT,
-            serde_json::json!({ "type": "finished", "cancelled": cancelled, "error": error }),
+            serde_json::json!({
+                "type": "finished",
+                "scan_id": scan_id,
+                "cancelled": cancelled,
+                "error": error,
+            }),
         );
         let _ = done.send(true);
     });
@@ -286,24 +303,7 @@ pub async fn export_found(
     passphrase: Option<PassphraseInput>,
 ) -> CommandResult<u64> {
     let session = state.session()?;
-    let matcher = filter.compile()?;
-    let base = filter.search_query(session.me.id);
-    let mut found = Vec::new();
-    for target in &targets {
-        let query = erasecord_core::search::SearchQuery {
-            channel_ids: target.channels.clone(),
-            ..base.clone()
-        };
-        if let Some(known) = state.messages.lookup(target, &query) {
-            let messages: Vec<_> = known
-                .messages
-                .into_iter()
-                .filter(|m| filter.contains(m.id) && matcher.matches(m))
-                .filter(|m| !(filter.skip_pinned && m.pinned))
-                .collect();
-            found.push((target.clone(), messages));
-        }
-    }
+    let found = scan::found_messages(&state.messages, session.me.id, &targets, &filter)?;
     let passphrase = passphrase.map(PassphraseInput::resolve).transpose()?;
     tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
         let format = ExportFormat::for_path(&plain_path(&path));
@@ -428,10 +428,29 @@ async fn open_export(
         let kind = if dry_run { "dry-run" } else { "deleted" };
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let age = if passphrase.is_some() { ".age" } else { "" };
-        let path = settings
-            .dir
-            .join(format!("erasecord-{kind}-{stamp}.{ext}{age}"));
-        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        // Never overwrite an earlier export, even from the same second.
+        let (path, file) = (1..)
+            .map(|n| {
+                let suffix = if n == 1 {
+                    String::new()
+                } else {
+                    format!("-{n}")
+                };
+                settings
+                    .dir
+                    .join(format!("erasecord-{kind}-{stamp}{suffix}.{ext}{age}"))
+            })
+            .take(100)
+            .find_map(|path| {
+                std::fs::File::options()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .ok()
+                    .map(|file| (path, file))
+            })
+            .ok_or_else(|| std::io::Error::other("no free file name"))?;
+        let file = std::io::BufWriter::new(file);
         let writer = match passphrase {
             None => RunWriter::Plain(ExportWriter::new(file, settings.format)?),
             Some(passphrase) => RunWriter::Encrypted(ExportWriter::new(

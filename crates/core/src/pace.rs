@@ -16,6 +16,8 @@ use std::time::Duration;
 
 use rand::RngExt;
 
+/// The longest pause that can be configured: ten minutes.
+pub const MAX_PAUSE_MS: u64 = 10 * 60 * 1000;
 /// A longer break after this many deletions.
 pub const BREAK_EVERY: u64 = 100;
 /// The break lasts this many regular pauses between deletions.
@@ -35,10 +37,11 @@ pub struct Pace {
 }
 
 impl Pace {
+    /// Pauses above [`MAX_PAUSE_MS`] are cut to it.
     pub fn new(delete_ms: u64, search_ms: u64) -> Self {
         Pace {
-            delete_ms,
-            search_ms,
+            delete_ms: delete_ms.min(MAX_PAUSE_MS),
+            search_ms: search_ms.min(MAX_PAUSE_MS),
             factor: AtomicU64::new(100),
             deletions: AtomicU64::new(0),
         }
@@ -112,6 +115,20 @@ mod tests {
         assert_eq!(breaks.len(), 2);
         let pace = Pace::new(0, 0);
         assert!((0..BREAK_EVERY).all(|_| pace.after_delete() == (Duration::ZERO, false)));
+    }
+
+    #[test]
+    fn absurd_pauses_are_cut_instead_of_overflowing() {
+        let pace = Pace::new(u64::MAX, u64::MAX);
+        for _ in 0..50 {
+            pace.slow_down();
+        }
+        for _ in 0..BREAK_EVERY {
+            assert!(
+                pace.after_delete().0 <= Duration::from_millis(MAX_PAUSE_MS * 4 * BREAK_PAUSES * 2)
+            );
+        }
+        assert!(pace.before_search() <= Duration::from_millis(MAX_PAUSE_MS * 5));
     }
 
     #[test]

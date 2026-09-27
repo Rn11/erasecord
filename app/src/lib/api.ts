@@ -39,8 +39,8 @@ export const api = {
   listChannels: (guildId: string) => invoke<GuildChannel[]>("list_channels", { guildId }),
   listFriends: () => invoke<Friend[]>("list_friends"),
   openDm: (userId: string) => invoke<Target>("open_dm", { userId }),
-  startScan: (targets: Target[], filter: Filter, options: JobOptions) =>
-    invoke<void>("start_scan", { targets, filter, options }),
+  startScan: (targets: Target[], filter: Filter, options: JobOptions, scanId: number) =>
+    invoke<void>("start_scan", { targets, filter, options, scanId }),
   stopScan: () => invoke<void>("stop_scan"),
   exportFound: (targets: Target[], filter: Filter, path: string, passphrase: PassphraseInput | null) =>
     invoke<number>("export_found", { targets, filter, path, passphrase }),
@@ -86,8 +86,8 @@ export function onJobEvent(handler: (event: JobEvent) => void): Promise<Unlisten
   return listen<JobEvent>("job-event", (event) => handler(event.payload));
 }
 
-export function onScanEvent(handler: (event: ScanEvent) => void): Promise<UnlistenFn> {
-  return listen<ScanEvent>("scan-event", (event) => handler(event.payload));
+export function onScanEvent(handler: (event: ScanEvent & { scan_id: number }) => void): Promise<UnlistenFn> {
+  return listen<ScanEvent & { scan_id: number }>("scan-event", (event) => handler(event.payload));
 }
 
 export function asCommandError(err: unknown): CommandError {

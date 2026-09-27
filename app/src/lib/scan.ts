@@ -14,6 +14,8 @@ export interface PlaceCount {
 }
 
 export interface ScanState {
+  /** Events of other counts are ignored. */
+  id: number;
   targets: Target[];
   places: Record<string, PlaceCount>;
   stats: ScanStats | null;
@@ -28,8 +30,11 @@ export interface ScanState {
   exact: boolean;
 }
 
+let lastId = 0;
+
 export function newScan(targets: Target[]): ScanState {
   return {
+    id: ++lastId,
     targets,
     places: {},
     stats: null,
@@ -125,6 +130,21 @@ export function readProgress(scan: ScanState): { read: number; of: number } {
     of += p.complete ? p.read : Math.max(p.total ?? 0, p.read);
   }
   return { read, of };
+}
+
+/**
+ * Pauses as whole, non-negative milliseconds (an emptied field gives
+ * null), within what the backend accepts.
+ */
+export function sanitizeOptions(options: JobOptions): JobOptions {
+  const ms = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) ? Math.min(Math.max(0, Math.round(value)), 600_000) : fallback;
+  return {
+    ...options,
+    delete_delay_ms: ms(options.delete_delay_ms, 2500),
+    search_delay_ms: ms(options.search_delay_ms, 3000),
+    max_rounds: Math.min(Math.max(1, Math.round(Number(options.max_rounds) || 3)), 10),
+  };
 }
 
 /** Roughly how long deleting `count` messages takes with these pauses. */

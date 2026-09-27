@@ -5,7 +5,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import type { UnlistenFn } from "@tauri-apps/api/event";
   import { api, asCommandError, onJobEvent, onScanEvent } from "$lib/api";
-  import { applyScanEvent, countOf, fromPackage, newScan, totalOf, type ScanState } from "$lib/scan";
+  import { applyScanEvent, countOf, fromPackage, newScan, sanitizeOptions, totalOf, type ScanState } from "$lib/scan";
   import { errorMessage } from "$lib/errors";
   import { applyDocumentLanguage, num, t } from "$lib/i18n.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
@@ -148,7 +148,9 @@
         if (run) applyEvent(run, event);
       }),
       await onScanEvent((event) => {
-        if (scan) applyScanEvent(scan, event);
+        if (!scan || event.scan_id !== scan.id) return;
+        applyScanEvent(scan, event);
+        if (event.type === "finished" && event.error?.kind === "unauthorized") fail(event.error);
       }),
     );
     // Not urgent: look for a newer version once the app is up.
@@ -453,7 +455,7 @@
         const result = await api.previewPackage(targets, $state.snapshot(filter));
         scan = fromPackage(targets, result.entries, result.stats);
       } else {
-        await api.startScan(targets, $state.snapshot(filter), $state.snapshot(options));
+        await api.startScan(targets, $state.snapshot(filter), sanitizeOptions($state.snapshot(options)), scan.id);
       }
     } catch (err) {
       const message = fail(err);
@@ -474,8 +476,17 @@
     return api.exportFound($state.snapshot(scan.targets), $state.snapshot(filter), path, pass);
   }
 
-  async function start(dryRun: boolean) {
+  /**
+   * Starts the clean-up of what was counted. `pass` is the passphrase for
+   * the backup and export; by default the one set up.
+   */
+  async function start(dryRun: boolean, pass: PassphraseInput | null = setupPassphrase) {
     if (!scan) return;
+    // Never save unencrypted what was meant to be encrypted.
+    if (saves && encrypt && !pass) {
+      scan.error = t("pass.confirmNeeded");
+      return;
+    }
     // Places without matches need no work; failed searches get another try.
     // A new real run replaces the unfinished one.
     if (!dryRun) unfinished = null;
@@ -487,9 +498,8 @@
     run = newRun($state.snapshot(runTargets), totalOf(current), dryRun);
     screen = "progress";
     try {
-      const jobOptions = { ...$state.snapshot(options), dry_run: dryRun };
-      const pass = setupPassphrase;
-      const backupPassphrase = options.backup_dir !== null ? pass : null;
+      const jobOptions = { ...sanitizeOptions($state.snapshot(options)), dry_run: dryRun };
+      const backupPassphrase = saves && encrypt ? pass : null;
       const exportSettings = exportTo ? $state.snapshot(exportTo) : null;
       const targets = $state.snapshot(runTargets);
       const path = pkg
@@ -497,8 +507,8 @@
         : await api.startJob(targets, $state.snapshot(filter), jobOptions, backupPassphrase, exportSettings);
       if (run) run.exportPath = path;
       lastRunPassphrase = pass;
-      // Every new backup gets new words.
-      if (backupPassphrase && passphrase?.mode === "generated") void freshPassphrase();
+      // Every new backup gets new words (a dry run's follow-up reuses its own).
+      if (!dryRun && backupPassphrase && passphrase?.mode === "generated") void freshPassphrase();
     } catch (err) {
       const message = fail(err);
       if (message && run) {
@@ -704,7 +714,7 @@
       <Progress
         {run}
         {filter}
-        onDeleteNow={() => start(false)}
+        onDeleteNow={() => start(false, lastRunPassphrase)}
         backupPassphrase={lastRunPassphrase}
         onPause={pause}
         onResume={resume}

@@ -183,8 +183,8 @@ function fakeStats(n: number, complete: boolean): ScanStats {
 }
 
 /** Counts, then "reads" page by page, like the backend's scan. */
-async function mockScan(targets: Target[], filter: Filter) {
-  const send = (event: ScanEvent) => emit("scan-event", event);
+async function mockScan(targets: Target[], filter: Filter, scanId: number) {
+  const send = (event: ScanEvent) => emit("scan-event", { ...event, scan_id: scanId });
   const totals = new Map<string, number>();
   for (const target of targets) {
     if (job.cancelled) return send({ type: "finished", cancelled: true, error: null });
@@ -368,7 +368,7 @@ export function installMockBackend() {
           return channelsOf(args.guildId);
         case "start_scan":
           job.cancelled = false;
-          void mockScan(args.targets as Target[], args.filter as Filter);
+          void mockScan(args.targets as Target[], args.filter as Filter, args.scanId as number);
           return null;
         case "stop_scan":
           job.cancelled = true;

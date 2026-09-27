@@ -10,11 +10,11 @@
 //! is emptied when the user logs out and when the app closes, and entries
 //! expire after [`CACHE_TTL`].
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Datelike, Local, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Timelike, Utc};
 use serde::Serialize;
 
 use crate::client::{Client, Notice};
@@ -65,6 +65,9 @@ struct CacheEntry {
     max_id: Option<Snowflake>,
     /// Newest first.
     messages: Vec<Message>,
+    ids: HashSet<Snowflake>,
+    /// Deleted since they were found.
+    gone: HashSet<Snowflake>,
     /// Where reading continues (the next `max_id`); `None` once complete.
     cursor: Option<Snowflake>,
     complete: bool,
@@ -98,6 +101,33 @@ fn close(a: Option<Snowflake>, b: Option<Snowflake>) -> bool {
     }
 }
 
+impl CacheEntry {
+    fn matches(&self, key: &CacheKey, query: &SearchQuery) -> bool {
+        self.at.elapsed() <= CACHE_TTL
+            && self.key == *key
+            && close(self.min_id, query.min_id)
+            && close(self.max_id, query.max_id)
+    }
+
+    /// Adds messages not known yet (and not deleted), keeping the newest
+    /// first.
+    fn merge(&mut self, hits: &[Message]) {
+        let mut sorted = true;
+        for hit in hits {
+            if self.gone.contains(&hit.id) || !self.ids.insert(hit.id) {
+                continue;
+            }
+            if self.messages.last().is_some_and(|last| hit.id > last.id) {
+                sorted = false;
+            }
+            self.messages.push(hit.clone());
+        }
+        if !sorted {
+            self.messages.sort_by_key(|m| std::cmp::Reverse(m.id));
+        }
+    }
+}
+
 impl MessageCache {
     pub fn new() -> Self {
         Self::default()
@@ -109,17 +139,9 @@ impl MessageCache {
 
     /// The messages known for `target` and this search, if any.
     pub fn lookup(&self, target: &Target, query: &SearchQuery) -> Option<Known> {
-        let mut entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock().unwrap();
         let entry = entries.get(&target.id)?;
-        if entry.at.elapsed() > CACHE_TTL {
-            entries.remove(&target.id);
-            return None;
-        }
-        let key = CacheKey::of(target.scope(), query);
-        if entry.key != key
-            || !close(entry.min_id, query.min_id)
-            || !close(entry.max_id, query.max_id)
-        {
+        if !entry.matches(&CacheKey::of(target.scope(), query), query) {
             return None;
         }
         let inside = |id: Snowflake| {
@@ -140,8 +162,10 @@ impl MessageCache {
 
     /// Adds a page of search results. `from` is the `max_id` the page was
     /// searched with, `next` where the following page starts (`None` at the
-    /// end). A page from the top starts a new entry; any other page must
-    /// continue the entry where it left off.
+    /// end). A page from the top starts an entry if there is none; a page
+    /// that continues the entry where it left off moves it on. Any other
+    /// page (e.g. checking from the top for new messages) only adds what it
+    /// found.
     fn store(
         &self,
         target: &Target,
@@ -153,10 +177,10 @@ impl MessageCache {
     ) {
         let key = CacheKey::of(target.scope(), query);
         let mut entries = self.entries.lock().unwrap();
-        let continues = entries
+        let known = entries
             .get(&target.id)
-            .is_some_and(|e| e.key == key && !e.complete && e.cursor == from);
-        if !continues {
+            .is_some_and(|e| e.matches(&key, query));
+        if !known {
             if from != query.max_id {
                 return;
             }
@@ -167,45 +191,42 @@ impl MessageCache {
                     min_id: query.min_id,
                     max_id: query.max_id,
                     messages: Vec::new(),
+                    ids: HashSet::new(),
+                    gone: HashSet::new(),
                     cursor: from,
                     complete: false,
-                    total: total.unwrap_or(0),
+                    total: 0,
                     at: Instant::now(),
                 },
             );
         }
         let entry = entries.get_mut(&target.id).expect("entry just made");
-        let oldest = entry.messages.last().map(|m| m.id);
-        entry.messages.extend(
-            hits.iter()
-                .filter(|m| oldest.is_none_or(|o| m.id < o))
-                .cloned(),
-        );
-        entry.cursor = next;
-        entry.complete = next.is_none();
-        if let Some(total) = total {
+        entry.merge(hits);
+        if !entry.complete && entry.cursor == from {
+            entry.cursor = next;
+            entry.complete = next.is_none();
+        }
+        if let Some(total) = total.filter(|_| !known) {
             entry.total = total;
         }
     }
 
-    /// Forgets messages that were deleted.
+    /// Forgets messages that were deleted; searches that still return them
+    /// (the index lags behind) do not bring them back.
     pub fn forget(&self, target_id: Snowflake, ids: &[Snowflake]) {
-        if ids.is_empty() {
-            return;
-        }
         if let Some(entry) = self.entries.lock().unwrap().get_mut(&target_id) {
             entry.messages.retain(|m| !ids.contains(&m.id));
+            for id in ids {
+                entry.ids.remove(id);
+                entry.gone.insert(*id);
+            }
         }
-    }
-
-    /// Forgets everything about a server or DM.
-    pub fn forget_target(&self, target_id: Snowflake) {
-        self.entries.lock().unwrap().remove(&target_id);
     }
 }
 
 /// Searches one page for `target`, below `from`, and puts it in the cache.
-/// Returns the hits and where the next page starts.
+/// Returns the hits, where the next page starts (`None` at the end) and
+/// Discord's count.
 pub(crate) async fn search_page(
     client: &Client,
     cache: Option<&MessageCache>,
@@ -214,9 +235,12 @@ pub(crate) async fn search_page(
     from: Option<Snowflake>,
     control: &JobControl,
 ) -> Result<(Vec<Message>, Option<Snowflake>, u64)> {
+    let base = SearchQuery {
+        channel_ids: target.channels.clone(),
+        ..base.clone()
+    };
     let query = SearchQuery {
         max_id: from,
-        channel_ids: target.channels.clone(),
         ..base.clone()
     };
     let response = control
@@ -224,19 +248,16 @@ pub(crate) async fn search_page(
         .await??;
     let total = response.total_results;
     let hits = response.into_hits();
-    let next = match hits.last() {
-        None => None,
-        Some(oldest) if oldest.id.0 == 0 => None,
-        Some(oldest) if base.min_id.is_some_and(|min| oldest.id <= min) => None,
-        Some(oldest) => Some(Snowflake(oldest.id.0 - 1)),
-    };
+    let next = hits
+        .last()
+        .map(|oldest| oldest.id)
+        // The end: nothing older can exist, or the range ends here.
+        .filter(|&oldest| oldest.0 > 0 && base.min_id.is_none_or(|min| oldest > min))
+        // A search that ignored the cursor must not page forever.
+        .filter(|&oldest| from.is_none_or(|from| oldest <= from))
+        .map(|oldest| Snowflake(oldest.0 - 1));
     if let Some(cache) = cache {
-        let first = from == base.max_id;
-        let base = SearchQuery {
-            channel_ids: target.channels.clone(),
-            ..base.clone()
-        };
-        cache.store(target, &base, from, &hits, next, first.then_some(total));
+        cache.store(target, &base, from, &hits, next, Some(total));
     }
     Ok((hits, next, total))
 }
@@ -270,8 +291,8 @@ pub struct ScanStats {
 #[derive(Default)]
 struct StatsBuilder {
     stats: ScanStats,
-    months: BTreeMap<String, u64>,
-    days: HashMap<String, u64>,
+    months: BTreeMap<(i32, u32), u64>,
+    days: HashMap<NaiveDate, u64>,
     week: [[u32; 24]; 7],
     words: HashMap<String, u64>,
     emoji: HashMap<String, u64>,
@@ -297,12 +318,9 @@ impl StatsBuilder {
         let local = sent.with_timezone(&Local);
         *self
             .months
-            .entry(local.format("%Y-%m").to_string())
+            .entry((local.year(), local.month()))
             .or_default() += 1;
-        *self
-            .days
-            .entry(local.format("%Y-%m-%d").to_string())
-            .or_default() += 1;
+        *self.days.entry(local.date_naive()).or_default() += 1;
         self.week[local.weekday().num_days_from_monday() as usize][local.hour() as usize] += 1;
         for token in message.content.split_whitespace() {
             if token.contains("://") || token.starts_with('<') {
@@ -335,11 +353,19 @@ impl StatsBuilder {
             all
         };
         let mut stats = self.stats.clone();
-        stats.months = self.months.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        stats.months = self
+            .months
+            .iter()
+            .map(|((y, m), n)| (format!("{y:04}-{m:02}"), *n))
+            .collect();
         stats.week = self.week.iter().map(|row| row.to_vec()).collect();
         stats.top_words = top(&self.words, 24);
         stats.top_emoji = top(&self.emoji, 8);
-        stats.busiest_day = top(&self.days, 1).into_iter().next();
+        stats.busiest_day = self
+            .days
+            .iter()
+            .max_by(|a, b| a.1.cmp(b.1).then_with(|| b.0.cmp(a.0)))
+            .map(|(day, n)| (day.format("%Y-%m-%d").to_string(), *n));
         stats
     }
 }
@@ -375,10 +401,6 @@ pub enum ScanEvent {
     Stats {
         stats: ScanStats,
     },
-    Finished {
-        cancelled: bool,
-        error: Option<String>,
-    },
 }
 
 /// Counts, then reads the matching messages of every target into `cache`,
@@ -398,128 +420,106 @@ pub async fn scan(
     let matcher = filter.compile()?;
     let base = filter.search_query(me);
     let pace = Pace::new(options.delete_delay_ms, options.search_delay_ms);
-    let mut searched = false;
     let mut builder = StatsBuilder::default();
+    let mut searched = false;
 
-    struct State {
+    /// Where reading a server or DM stands.
+    #[derive(Default)]
+    struct Place {
         read: u64,
         matching: u64,
         cursor: Option<Snowflake>,
         complete: bool,
         failed: bool,
     }
-    let wanted = |m: &Message| wanted(m, me, filter, &matcher);
-    let mut states = Vec::with_capacity(targets.len());
+    // Counts the messages that would be deleted and adds them to the
+    // statistics.
+    let tally = |place: &mut Place, messages: &[Message], builder: &mut StatsBuilder| {
+        place.read += messages.len() as u64;
+        for m in messages.iter().filter(|m| wanted(m, me, filter, &matcher)) {
+            if filter.skip_pinned && m.pinned {
+                builder.stats.pinned_kept += 1;
+            } else {
+                place.matching += 1;
+                builder.add(m);
+            }
+        }
+    };
+    let read_event = |target: &Target, place: &Place| ScanEvent::Read {
+        target_id: target.id,
+        read: place.read,
+        matching: place.matching,
+        complete: place.complete,
+    };
 
     // First every count, so all numbers are there quickly.
+    let mut places = Vec::with_capacity(targets.len());
     for target in targets {
+        let mut place = Place::default();
         let query = SearchQuery {
             channel_ids: target.channels.clone(),
             ..base.clone()
         };
-        if let Some(known) = cache.lookup(target, &query) {
-            let mut matching = 0;
-            for m in known.messages.iter().filter(|m| wanted(m)) {
-                matching += 1;
-                if filter.skip_pinned && m.pinned {
-                    builder.stats.pinned_kept += 1;
-                    matching -= 1;
-                } else {
-                    builder.add(m);
-                }
+        let total = if let Some(known) = cache.lookup(target, &query) {
+            tally(&mut place, &known.messages, &mut builder);
+            place.cursor = known.cursor;
+            place.complete = known.complete;
+            Ok(known.total)
+        } else {
+            if searched {
+                control.sleep_for(pace.before_search()).await?;
             }
-            on_event(ScanEvent::Counted {
-                target_id: target.id,
-                total: if known.complete {
-                    matching
-                } else {
-                    known.total
+            control.checkpoint().await?;
+            searched = true;
+            on_event(ScanEvent::Activity {
+                activity: Activity::Counting {
+                    target_id: target.id,
                 },
-                error: None,
             });
-            on_event(ScanEvent::Read {
-                target_id: target.id,
-                read: known.messages.len() as u64,
-                matching,
-                complete: known.complete,
-            });
-            states.push(State {
-                read: known.messages.len() as u64,
-                matching,
-                cursor: known.cursor,
-                complete: known.complete,
-                failed: false,
-            });
-            continue;
-        }
-        if searched {
-            control.sleep_for(pace.before_search()).await?;
-        }
-        control.checkpoint().await?;
-        searched = true;
-        on_event(ScanEvent::Activity {
-            activity: Activity::Counting {
-                target_id: target.id,
-            },
-        });
-        match search_page(client, Some(cache), target, &base, base.max_id, control).await {
-            Ok((hits, next, total)) => {
-                let mut matching = 0;
-                for m in hits.iter().filter(|m| wanted(m)) {
-                    if filter.skip_pinned && m.pinned {
-                        builder.stats.pinned_kept += 1;
-                    } else {
-                        matching += 1;
-                        builder.add(m);
-                    }
+            match search_page(client, Some(cache), target, &base, base.max_id, control).await {
+                Ok((hits, next, total)) => {
+                    tally(&mut place, &hits, &mut builder);
+                    place.cursor = next;
+                    place.complete = next.is_none();
+                    Ok(total)
                 }
+                Err(err @ (Error::Unauthorized | Error::Cancelled)) => return Err(err),
+                Err(err) => Err(err.to_string()),
+            }
+        };
+        match total {
+            Ok(total) => {
                 on_event(ScanEvent::Counted {
                     target_id: target.id,
-                    total: if next.is_none() { matching } else { total },
+                    // Once everything is read, the count is exact.
+                    total: if place.complete {
+                        place.matching
+                    } else {
+                        total
+                    },
                     error: None,
                 });
-                on_event(ScanEvent::Read {
-                    target_id: target.id,
-                    read: hits.len() as u64,
-                    matching,
-                    complete: next.is_none(),
-                });
-                states.push(State {
-                    read: hits.len() as u64,
-                    matching,
-                    cursor: next,
-                    complete: next.is_none(),
-                    failed: false,
-                });
+                on_event(read_event(target, &place));
             }
-            Err(err @ (Error::Unauthorized | Error::Cancelled)) => return Err(err),
-            Err(err) => {
+            Err(error) => {
+                place.failed = true;
                 on_event(ScanEvent::Counted {
                     target_id: target.id,
                     total: 0,
-                    error: Some(err.to_string()),
-                });
-                states.push(State {
-                    read: 0,
-                    matching: 0,
-                    cursor: None,
-                    complete: false,
-                    failed: true,
+                    error: Some(error),
                 });
             }
         }
         on_event(ScanEvent::Stats {
             stats: builder.snapshot(),
         });
+        places.push(place);
     }
-    on_event(ScanEvent::Stats {
-        stats: builder.snapshot(),
-    });
 
     // Then read the rest, place by place.
-    for (target, state) in targets.iter().zip(states.iter_mut()) {
+    for (target, place) in targets.iter().zip(places.iter_mut()) {
         let mut page = 1;
-        while !state.complete && !state.failed {
+        while !place.complete && !place.failed {
             if searched {
                 control.sleep_for(pace.before_search()).await?;
             }
@@ -532,30 +532,16 @@ pub async fn scan(
                     page,
                 },
             });
-            match search_page(client, Some(cache), target, &base, state.cursor, control).await {
+            match search_page(client, Some(cache), target, &base, place.cursor, control).await {
                 Ok((hits, next, _)) => {
-                    state.read += hits.len() as u64;
-                    for m in hits.iter().filter(|m| wanted(m)) {
-                        if filter.skip_pinned && m.pinned {
-                            builder.stats.pinned_kept += 1;
-                        } else {
-                            state.matching += 1;
-                            builder.add(m);
-                        }
-                    }
-                    state.cursor = next;
-                    state.complete = next.is_none();
-                    on_event(ScanEvent::Read {
-                        target_id: target.id,
-                        read: state.read,
-                        matching: state.matching,
-                        complete: state.complete,
-                    });
-                    if state.complete {
-                        // Now the count is exact.
+                    tally(place, &hits, &mut builder);
+                    place.cursor = next;
+                    place.complete = next.is_none();
+                    on_event(read_event(target, place));
+                    if place.complete {
                         on_event(ScanEvent::Counted {
                             target_id: target.id,
-                            total: state.matching,
+                            total: place.matching,
                             error: None,
                         });
                     }
@@ -565,10 +551,10 @@ pub async fn scan(
                 }
                 Err(err @ (Error::Unauthorized | Error::Cancelled)) => return Err(err),
                 Err(err) => {
-                    state.failed = true;
+                    place.failed = true;
                     on_event(ScanEvent::Counted {
                         target_id: target.id,
-                        total: state.matching,
+                        total: place.matching,
                         error: Some(err.to_string()),
                     });
                 }
@@ -576,6 +562,34 @@ pub async fn scan(
         }
     }
     Ok(())
+}
+
+/// The messages found for `targets` that `filter` would delete: what an
+/// export before deleting saves.
+pub fn found_messages(
+    cache: &MessageCache,
+    me: Snowflake,
+    targets: &[Target],
+    filter: &Filter,
+) -> Result<Vec<(Target, Vec<Message>)>> {
+    let matcher = filter.compile()?;
+    let base = filter.search_query(me);
+    Ok(targets
+        .iter()
+        .filter_map(|target| {
+            let query = SearchQuery {
+                channel_ids: target.channels.clone(),
+                ..base.clone()
+            };
+            let known = cache.lookup(target, &query)?;
+            let messages: Vec<Message> = known
+                .messages
+                .into_iter()
+                .filter(|m| wanted(m, me, filter, &matcher) && !(filter.skip_pinned && m.pinned))
+                .collect();
+            Some((target.clone(), messages))
+        })
+        .collect())
 }
 
 /// Statistics about the messages of a data package that match `filter`.
@@ -665,7 +679,8 @@ mod tests {
         assert_eq!(known.messages.len(), 6);
         assert!(!known.complete);
         assert_eq!(known.total, 10);
-        // A page that does not continue where the entry stopped is ignored.
+        // A page that does not continue where the entry stopped adds its
+        // messages, but reading still continues where it left off.
         cache.store(
             &t,
             &query,
@@ -674,7 +689,9 @@ mod tests {
             None,
             None,
         );
-        assert!(!cache.lookup(&t, &query).unwrap().complete);
+        let known = cache.lookup(&t, &query).unwrap();
+        assert!(!known.complete);
+        assert_eq!(known.cursor, Some(Snowflake((5 << 22) - 1)));
         let page2: Vec<Message> = (1..=4).rev().map(message).collect();
         cache.store(
             &t,
@@ -687,8 +704,25 @@ mod tests {
         let known = cache.lookup(&t, &query).unwrap();
         assert!(known.complete);
         assert_eq!(known.messages.len(), 10);
+        assert!(known.messages.windows(2).all(|w| w[0].id > w[1].id));
         cache.forget(t.id, &[Snowflake(3 << 22)]);
         assert_eq!(cache.lookup(&t, &query).unwrap().messages.len(), 9);
+        // Checking from the top again: a deleted message the index still
+        // returns stays gone, a new one is added, and the entry stays complete.
+        cache.store(
+            &t,
+            &query,
+            None,
+            &[message(11), message(3)],
+            Some(Snowflake(1)),
+            Some(99),
+        );
+        let known = cache.lookup(&t, &query).unwrap();
+        assert!(known.complete);
+        assert_eq!(known.total, 10);
+        assert_eq!(known.messages.len(), 10);
+        assert_eq!(known.messages[0].id, Snowflake(11 << 22));
+        assert!(!known.messages.iter().any(|m| m.id == Snowflake(3 << 22)));
         // Another search does not use it.
         let other = SearchQuery {
             content: Some("x".into()),
