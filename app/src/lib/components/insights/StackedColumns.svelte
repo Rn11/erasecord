@@ -12,6 +12,7 @@
     onPick,
     pickHint,
     height = 220,
+    legend = true,
   }: {
     /** Per column: the total and each series; the rest is "other". */
     columns: Bucket[];
@@ -22,6 +23,8 @@
     onPick?: (key: string) => void;
     pickHint?: string;
     height?: number;
+    /** Off when the page shows the colours itself. */
+    legend?: boolean;
   } = $props();
 
   const PAD = { top: 10, right: 6, bottom: 24, left: 44 };
@@ -85,9 +88,11 @@
 <div class="stacked">
   <div class="tools small">
     <div class="legend" aria-label={t("insights.legend")}>
-      {#each layers as layer (layer.label)}
-        <span class="key"><span class="swatch" style:background={layer.color}></span>{layer.label}</span>
-      {/each}
+      {#if legend}
+        {#each layers as layer (layer.label)}
+          <span class="key"><span class="swatch" style:background={layer.color}></span>{layer.label}</span>
+        {/each}
+      {/if}
     </div>
     <button class="link small" onclick={() => (table = !table)}>
       {table ? t("stats.hideTable") : t("stats.showTable")}

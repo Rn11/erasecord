@@ -1,24 +1,36 @@
 <script lang="ts">
   import { num, t } from "$lib/i18n.svelte";
   import { insights, loadInfo } from "$lib/insights/store.svelte";
-  import type { Section } from "$lib/insights/types";
+  import type { CleanUpRequest, Section } from "$lib/insights/types";
   import type { PackageSummary } from "$lib/types";
+  import LinksView from "./LinksView.svelte";
   import Overview from "./Overview.svelte";
+  import PlacesView from "./PlacesView.svelte";
   import ScopeBar from "./ScopeBar.svelte";
+  import SearchView from "./SearchView.svelte";
   import TimeView from "./TimeView.svelte";
   import Tooltip from "./Tooltip.svelte";
+  import WordsView from "./WordsView.svelte";
 
   let {
     pkg,
     importing,
     importError,
     onImport,
+    onCleanUp,
   }: {
     pkg: PackageSummary | null;
     importing: boolean;
     importError: string | null;
     onImport: (folder: boolean) => void;
+    /** Opens Clean up with these messages selected. */
+    onCleanUp: (request: CleanUpRequest) => void;
   } = $props();
+
+  function search(words: string) {
+    insights.query = words;
+    insights.section = "search";
+  }
 
   $effect(() => {
     if (pkg && !insights.info) loadInfo();
@@ -27,6 +39,10 @@
   const sections: { id: Section; label: () => string }[] = [
     { id: "overview", label: () => t("insights.overview") },
     { id: "time", label: () => t("insights.time") },
+    { id: "places", label: () => t("insights.places") },
+    { id: "words", label: () => t("insights.words") },
+    { id: "links", label: () => t("insights.linksFiles") },
+    { id: "search", label: () => t("insights.search") },
   ];
 </script>
 
@@ -85,6 +101,14 @@
         <Overview bind:scope={insights.scope} {pkg} />
       {:else if insights.section === "time"}
         <TimeView bind:scope={insights.scope} {pkg} />
+      {:else if insights.section === "places"}
+        <PlacesView bind:scope={insights.scope} {pkg} {onCleanUp} />
+      {:else if insights.section === "words"}
+        <WordsView bind:scope={insights.scope} {pkg} onSearch={search} />
+      {:else if insights.section === "links"}
+        <LinksView bind:scope={insights.scope} />
+      {:else if insights.section === "search"}
+        <SearchView bind:scope={insights.scope} {pkg} {onCleanUp} />
       {/if}
     </div>
     <p class="muted small privacy">{t("insights.privacyShort", { count: num(insights.info.messages) })}</p>

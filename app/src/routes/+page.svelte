@@ -11,6 +11,7 @@
   import {
     contentProblem,
     displayName,
+    emptyContent,
     rangeProblem,
     toFilter,
     type ContentForm,
@@ -36,6 +37,7 @@
   import Setup from "$lib/components/Setup.svelte";
   import Insights from "$lib/components/insights/Insights.svelte";
   import { resetInsights } from "$lib/insights/store.svelte";
+  import type { CleanUpRequest } from "$lib/insights/types";
 
   type Screen = "starting" | "login" | "setup" | "preview" | "progress";
 
@@ -290,6 +292,29 @@
     tab = "insights";
   }
 
+  /** Opens Clean up with what Insights found, ready to be counted. */
+  function cleanUpFromInsights(request: CleanUpRequest) {
+    if (!user) {
+      notice = t("insights.loginToCleanUp");
+      showLogin();
+      return;
+    }
+    selected.clear();
+    channelPicks.clear();
+    for (const id of request.places) selected.add(id);
+    if (request.channels.length > 0 && request.places.length === 1) {
+      channelPicks.set(request.places[0], [...request.channels]);
+    }
+    range =
+      request.from || request.to
+        ? { ...range, mode: "between", from: request.from ?? "", to: request.to ?? "" }
+        : { ...range, mode: "all" };
+    content = { ...emptyContent(), contains: request.contains };
+    notice = t("insights.handedOver");
+    tab = "cleanup";
+    screen = "setup";
+  }
+
   function showLogin() {
     tab = "cleanup";
     screen = "login";
@@ -430,7 +455,7 @@
     {#if screen === "starting"}
       <p class="starting muted"><span class="spinner"></span> {t("common.starting")}</p>
     {:else if tab === "insights" && (user || offline)}
-      <Insights {pkg} {importing} {importError} onImport={importPackage} />
+      <Insights {pkg} {importing} {importError} onImport={importPackage} onCleanUp={cleanUpFromInsights} />
     {:else if screen === "login" || !user}
       <Login {notice} onLogin={enter} onInsights={offline ? undefined : openInsightsOffline} />
     {:else if screen === "setup"}

@@ -10,6 +10,8 @@ export const insights = $state({
   scope: emptyScope(),
   info: null as Info | null,
   infoError: null as string | null,
+  /** The words last searched for. */
+  query: "",
   /** Bumped for every newly imported package, which empties the cache. */
   generation: 0,
 });
@@ -22,6 +24,7 @@ export function resetInsights() {
   insights.info = null;
   insights.infoError = null;
   insights.scope = emptyScope();
+  insights.query = "";
   insights.generation += 1;
 }
 

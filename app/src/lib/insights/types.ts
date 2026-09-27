@@ -175,3 +175,13 @@ export interface SearchResult {
 export type Section = "overview" | "time" | "places" | "words" | "links" | "search";
 
 export const emptyScope = (): Scope => ({ from: null, to: null, places: [], channels: [] });
+
+/** What Insights hands to Clean up: these messages, ready to be counted. */
+export interface CleanUpRequest {
+  places: Snowflake[];
+  channels: Snowflake[];
+  from: string | null;
+  to: string | null;
+  /** Words that must all appear, as in "Containing all of these words". */
+  contains: string;
+}
