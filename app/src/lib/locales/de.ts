@@ -150,6 +150,8 @@ export const de: Dictionary = {
   "has.embed": "Einbettungen",
   "has.sticker": "Sticker",
 
+  "problem.beforeDiscord": "Dieser Zeitraum endet, bevor es Discord gab (2015), und enthält daher keine Nachrichten.",
+
   "problem.amount": "Gib eine ganze Zahl größer als 0 ein.",
   "problem.pickDate": "Wähle mindestens ein Datum.",
   "problem.dateOrder": "Das Startdatum liegt nach dem Enddatum.",

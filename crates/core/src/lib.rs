@@ -12,6 +12,8 @@ pub mod delete;
 pub mod error;
 pub mod export;
 pub mod filter;
+#[cfg(test)]
+mod fuzz_tests;
 pub mod insights;
 pub mod inspect;
 pub mod job;

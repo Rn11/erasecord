@@ -289,7 +289,7 @@ pub struct ScanStats {
 }
 
 #[derive(Default)]
-struct StatsBuilder {
+pub(crate) struct StatsBuilder {
     stats: ScanStats,
     months: BTreeMap<(i32, u32), u64>,
     days: HashMap<NaiveDate, u64>,
@@ -342,6 +342,40 @@ impl StatsBuilder {
             {
                 *self.words.entry(word.to_owned()).or_default() += 1;
             }
+        }
+    }
+
+    /// Adds what another builder counted.
+    fn merge(&mut self, other: StatsBuilder) {
+        let (a, b) = (&mut self.stats, other.stats);
+        a.messages += b.messages;
+        a.words += b.words;
+        a.characters += b.characters;
+        a.with_files += b.with_files;
+        a.images += b.images;
+        a.videos += b.videos;
+        a.audio += b.audio;
+        a.links += b.links;
+        a.pinned_kept += b.pinned_kept;
+        a.longest = a.longest.max(b.longest);
+        a.first = a.first.min(b.first).or(a.first).or(b.first);
+        a.last = a.last.max(b.last);
+        for (k, v) in other.months {
+            *self.months.entry(k).or_default() += v;
+        }
+        for (k, v) in other.days {
+            *self.days.entry(k).or_default() += v;
+        }
+        for (row, other_row) in self.week.iter_mut().zip(other.week) {
+            for (cell, n) in row.iter_mut().zip(other_row) {
+                *cell += n;
+            }
+        }
+        for (k, v) in other.words {
+            *self.words.entry(k).or_default() += v;
+        }
+        for (k, v) in other.emoji {
+            *self.emoji.entry(k).or_default() += v;
         }
     }
 
@@ -592,7 +626,8 @@ pub fn found_messages(
         .collect())
 }
 
-/// Statistics about the messages of a data package that match `filter`.
+/// Statistics about the messages of a data package that match `filter`,
+/// counted on all cores.
 pub fn package_stats(
     package: &crate::package::Package,
     me: Snowflake,
@@ -600,21 +635,41 @@ pub fn package_stats(
     filter: &Filter,
 ) -> Result<ScanStats> {
     let matcher = filter.compile_for_package()?;
-    let mut builder = StatsBuilder::default();
-    for target in targets {
-        for channel in package.channels_of(target) {
-            for m in &channel.messages {
-                if !filter.contains(m.id) {
-                    continue;
-                }
-                let message = m.to_message(channel.id, me);
-                if matcher.matches(&message) {
-                    builder.add(&message);
-                }
-            }
-        }
+    let work: Vec<(Snowflake, &crate::package::PackageMessage)> = targets
+        .iter()
+        .flat_map(|target| package.channels_of(target))
+        .flat_map(|channel| channel.messages.iter().map(move |m| (channel.id, m)))
+        .filter(|(_, m)| filter.contains(m.id))
+        .collect();
+    let workers = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = work.len().div_ceil(workers).max(1);
+    let parts: Vec<StatsBuilder> = std::thread::scope(|scope| {
+        let handles: Vec<_> = work
+            .chunks(chunk)
+            .map(|part| {
+                let matcher = &matcher;
+                scope.spawn(move || {
+                    let mut builder = StatsBuilder::default();
+                    for (channel, m) in part {
+                        let message = m.to_message(*channel, me);
+                        if matcher.matches(&message) {
+                            builder.add(&message);
+                        }
+                    }
+                    builder
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("statistics worker"))
+            .collect()
+    });
+    let mut total = StatsBuilder::default();
+    for part in parts {
+        total.merge(part);
     }
-    Ok(builder.snapshot())
+    Ok(total.snapshot())
 }
 
 /// Whether a search result would be dealt with (deleted, or kept because
@@ -624,6 +679,24 @@ fn wanted(message: &Message, me: Snowflake, filter: &Filter, matcher: &Matcher) 
         && filter.contains(message.id)
         && matcher.matches(message)
         && crate::delete::is_deletable_kind(message.kind)
+}
+
+/// Lets other tests build statistics.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::*;
+
+    pub(crate) fn builder() -> StatsBuilder {
+        StatsBuilder::default()
+    }
+
+    pub(crate) fn add(builder: &mut StatsBuilder, message: &Message) {
+        builder.add(message);
+    }
+
+    pub(crate) fn snapshot(builder: &StatsBuilder) -> ScanStats {
+        builder.snapshot()
+    }
 }
 
 #[cfg(test)]
@@ -751,6 +824,39 @@ mod tests {
             ..Default::default()
         };
         assert!(cache.lookup(&t, &much_later).is_none());
+    }
+
+    #[test]
+    fn merged_statistics_equal_counting_in_one_go() {
+        let messages: Vec<Message> = (0..300u64)
+            .map(|i| {
+                let mut m = message(1_600_000_000_000 - 1_420_070_400_000 + i * 7_919_000_000);
+                m.content = format!(
+                    "word{} shared 🎉 https://x.y {}",
+                    i % 13,
+                    "a".repeat((i % 50) as usize)
+                );
+                m
+            })
+            .collect();
+        let mut whole = StatsBuilder::default();
+        for m in &messages {
+            whole.add(m);
+        }
+        let mut merged = StatsBuilder::default();
+        for part in messages.chunks(37) {
+            let mut builder = StatsBuilder::default();
+            for m in part {
+                builder.add(m);
+            }
+            merged.merge(builder);
+        }
+        let (a, b) = (whole.snapshot(), merged.snapshot());
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            serde_json::to_value(&b).unwrap()
+        );
+        assert!(a.first < a.last);
     }
 
     #[test]

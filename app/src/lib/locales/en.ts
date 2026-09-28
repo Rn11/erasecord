@@ -151,6 +151,8 @@ export const en = {
   "has.embed": "Embeds",
   "has.sticker": "Stickers",
 
+  "problem.beforeDiscord": "This time range ends before Discord existed (2015), so it contains no messages.",
+
   "problem.amount": "Enter a whole number greater than 0.",
   "problem.pickDate": "Pick at least one date.",
   "problem.dateOrder": "The start date is after the end date.",

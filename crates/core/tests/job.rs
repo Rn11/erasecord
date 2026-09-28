@@ -1326,3 +1326,148 @@ async fn a_dry_run_fills_the_cache_for_the_real_run() {
     assert_eq!(summary.stats.deleted, 30);
     assert_eq!(fake.state.lock().unwrap().search_calls, searches + 1);
 }
+
+#[tokio::test]
+async fn deleted_messages_the_index_still_returns_do_not_come_back() {
+    let messages = (0..40)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let mut state = State::with_messages(messages);
+    state.stale_index = true;
+    let fake = FakeDiscord::start(state).await;
+    let cache = MessageCache::new();
+    let filter = Filter::default();
+    scan_into(&fake, &cache, &filter).await;
+
+    let summary = run_cached(&fake, &cache, &filter, fast()).await;
+    assert_eq!(summary.stats.deleted, 40);
+    assert_eq!(fake.delete_calls(), 40, "nothing is deleted twice");
+
+    // Counting again uses what is known: nothing left, although the index
+    // still lists all 40.
+    let events = scan_into(&fake, &cache, &filter).await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ScanEvent::Read {
+            matching: 0,
+            complete: true,
+            ..
+        }
+    )));
+}
+
+#[tokio::test]
+async fn a_search_that_ignores_the_cursor_does_not_page_forever() {
+    let messages = (0..60)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let mut state = State::with_messages(messages);
+    state.ignore_cursor = true;
+    let fake = FakeDiscord::start(state).await;
+    let cache = MessageCache::new();
+    let filter = Filter::default();
+
+    let scan = tokio::time::timeout(Duration::from_secs(10), scan_into(&fake, &cache, &filter));
+    scan.await.expect("counting ended");
+    assert!(fake.state.lock().unwrap().search_calls < 10);
+    let targets = [dm_target()];
+    let run = tokio::time::timeout(
+        Duration::from_secs(10),
+        run_job(&fake, &targets, Filter::default(), fast()),
+    );
+    let (summary, _) = run.await.expect("deleting ended");
+    assert!(summary.error.is_none());
+}
+
+/// A Discord that fails at random, a quarter of the time. Whatever happens,
+/// only own messages in the range may be deleted, the run must end, and a
+/// second run on a calm Discord deletes the rest.
+#[tokio::test]
+async fn survives_a_flaky_discord() {
+    use rand::SeedableRng;
+    for seed in 0..6 {
+        let mut messages = Vec::new();
+        for minute in 0..80 {
+            messages.push(FakeMessage::in_dm(minute, 0));
+            messages.push(FakeMessage::in_guild(minute, 1, OTHER));
+            messages.push(FakeMessage::in_guild(minute, 2, ME));
+        }
+        let mut state = State::with_messages(messages.clone());
+        state.chaos = Some((rand::rngs::StdRng::seed_from_u64(seed), 0.25));
+        let fake = FakeDiscord::start(state).await;
+        let cache = MessageCache::new();
+        let filter = Filter {
+            after: Some(at(10)),
+            before: Some(at(70)),
+            ..Default::default()
+        };
+        let targets = [dm_target(), guild_target()];
+        let _ = tokio::time::timeout(
+            Duration::from_secs(60),
+            scan::scan(
+                &fake.client(),
+                Snowflake(ME),
+                &targets,
+                &filter,
+                &fast(),
+                &JobControl::new(),
+                &cache,
+                |_| {},
+            ),
+        )
+        .await
+        .expect("counting ended");
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let (client, options, control) = (fake.client(), fast(), JobControl::new());
+        let run = job::run_with_cache(
+            &client,
+            Snowflake(ME),
+            &targets,
+            &filter,
+            &options,
+            &control,
+            Some(&cache),
+            tx,
+        );
+        tokio::time::timeout(Duration::from_secs(60), run)
+            .await
+            .expect("deleting ended");
+
+        let in_range = |m: &FakeMessage| {
+            m.author_id == ME && (10..70).any(|min| m.id >> 22 == id_at(min, 0) >> 22)
+        };
+        let remaining = fake.remaining();
+        for m in &messages {
+            if !in_range(m) {
+                assert!(
+                    remaining.contains(&m.id),
+                    "seed {seed}: deleted a message it must not touch"
+                );
+            }
+        }
+        // Calm again: the rest goes.
+        fake.state.lock().unwrap().chaos = None;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        job::run_with_cache(
+            &fake.client(),
+            Snowflake(ME),
+            &targets,
+            &filter,
+            &fast(),
+            &JobControl::new(),
+            Some(&cache),
+            tx,
+        )
+        .await;
+        let left: Vec<_> = fake
+            .remaining()
+            .into_iter()
+            .filter(|id| messages.iter().any(|m| m.id == *id && in_range(m)))
+            .collect();
+        assert!(
+            left.is_empty(),
+            "seed {seed}: {} left after a calm run",
+            left.len()
+        );
+    }
+}

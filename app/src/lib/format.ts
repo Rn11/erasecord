@@ -45,6 +45,9 @@ export function contentProblem(content: ContentForm): string | null {
   return null;
 }
 
+/** 2015-01-01, when Discord's IDs begin. */
+const DISCORD_EPOCH_MS = 1_420_070_400_000;
+
 /** Why the form cannot be used yet, or null. */
 export function rangeProblem(range: RangeForm): string | null {
   if (range.mode === "older_than" && !(Number.isInteger(range.amount) && range.amount > 0)) {
@@ -54,6 +57,17 @@ export function rangeProblem(range: RangeForm): string | null {
     if (!range.from && !range.to) return t("problem.pickDate");
     if (range.from && range.to && range.from > range.to) return t("problem.dateOrder");
   }
+  // Nothing was written before Discord existed; huge numbers would not
+  // even give a valid date.
+  const end =
+    range.mode === "older_than"
+      ? subtract(new Date(), range.amount, range.unit)
+      : range.mode === "between" && range.to
+        ? localMidnight(range.to, 1)
+        : null;
+  if (end && !(end.getTime() > DISCORD_EPOCH_MS)) return t("problem.beforeDiscord");
+  const start = range.mode === "between" && range.from ? localMidnight(range.from) : null;
+  if (start && Number.isNaN(start.getTime())) return t("problem.pickDate");
   return null;
 }
 

@@ -149,6 +149,8 @@ export const es: Dictionary = {
   "has.embed": "Contenido incrustado",
   "has.sticker": "Stickers",
 
+  "problem.beforeDiscord": "Este intervalo termina antes de que existiera Discord (2015), así que no contiene mensajes.",
+
   "problem.amount": "Introduce un número entero mayor que 0.",
   "problem.pickDate": "Elige al menos una fecha.",
   "problem.dateOrder": "La fecha de inicio es posterior a la fecha final.",

@@ -149,6 +149,8 @@ export const sv: Dictionary = {
   "has.embed": "Inbäddningar",
   "has.sticker": "Klistermärken",
 
+  "problem.beforeDiscord": "Tidsintervallet slutar innan Discord fanns (2015) och innehåller därför inga meddelanden.",
+
   "problem.amount": "Ange ett heltal större än 0.",
   "problem.pickDate": "Välj minst ett datum.",
   "problem.dateOrder": "Startdatumet ligger efter slutdatumet.",

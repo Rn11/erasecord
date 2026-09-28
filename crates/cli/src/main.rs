@@ -343,9 +343,14 @@ impl Command {
     /// Catches usage mistakes before logging in.
     fn check(&self) -> Result<()> {
         let (selection, range, content, needs_confirmation) = match self {
+            // Read the state file before logging in, so a wrong one fails fast.
+            Command::Resume { file, .. } => {
+                SavedRun::load(file)
+                    .with_context(|| format!("cannot read the state file {}", file.display()))?;
+                return Ok(());
+            }
             Command::List { .. }
             | Command::Channels { .. }
-            | Command::Resume { .. }
             | Command::Stats { .. }
             | Command::Search { .. }
             | Command::InspectPackage { .. }
@@ -478,7 +483,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             config.api_base = api_base;
         }
         let client = Client::with_config(&read_token()?, config)?;
+        // Say why logging in takes long (no connection, Discord down).
+        client.set_notice_sink(Some(Arc::new(|notice| {
+            eprintln!("  {}", describe_notice(&notice));
+        })));
         let me = client.current_user().await.context("could not log in")?;
+        client.set_notice_sink(None);
         eprintln!("Logged in as {} ({})", me.display_name(), me.id);
         Some((client, me.id))
     };

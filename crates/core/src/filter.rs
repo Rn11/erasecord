@@ -165,6 +165,14 @@ impl Filter {
                 ));
             }
         }
+        // Discord started in 2015: a range that ends before would search
+        // everything for nothing.
+        let discord_began = crate::snowflake::Snowflake(0).created_at();
+        if self.before.is_some_and(|before| before <= discord_began) {
+            return Err(Error::InvalidFilter(
+                "the time range ends before Discord existed (2015)".into(),
+            ));
+        }
         let pattern = match self.pattern.as_deref().map(str::trim) {
             None | Some("") => None,
             Some(pattern) => Some(

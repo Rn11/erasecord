@@ -161,6 +161,8 @@ export const uk: Dictionary = {
   "has.embed": "Вбудований вміст",
   "has.sticker": "Стікери",
 
+  "problem.beforeDiscord": "Цей проміжок закінчується до появи Discord (2015), тож у ньому немає повідомлень.",
+
   "problem.amount": "Введіть ціле число, більше за 0.",
   "problem.pickDate": "Виберіть принаймні одну дату.",
   "problem.dateOrder": "Дата початку пізніша за дату завершення.",
