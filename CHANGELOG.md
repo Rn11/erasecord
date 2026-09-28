@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - **Messages are searched for only once.** Counting reads them and shows statistics while it goes (messages per
   month, weekday × hour, words and emoji used most, files, links, busiest day, how long deleting takes). The dry
@@ -16,6 +16,11 @@
 - Release files: the command line tool is now `erasecord-cli-*`, and the release notes say which file to
   download.
 - The language menu has a single-colour icon.
+- The app icon has a transparent background (it showed a black square on Windows).
+- More robust: randomized tests with broken data packages, backups, filters and a Discord that fails at
+  random; a time range before 2015 is refused with a clear message, a search that ignores its cursor can no
+  longer page forever, and data package statistics are counted on all cores.
+- Updating: 0.3.0 offers this version by itself a few seconds after starting.
 
 ## 0.3.0
 
