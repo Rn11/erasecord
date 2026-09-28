@@ -11,7 +11,8 @@ import type {
   GuildChannel,
   JobEvent,
   PackageSummary,
-  PreviewEntry,
+  ScanEvent,
+  ScanStats,
   Stats,
   Target,
   UnfinishedRun,
@@ -142,6 +143,92 @@ async function checkpoint(): Promise<boolean> {
   return !job.cancelled;
 }
 
+let exportPath: string | null = null;
+
+const WORDS = "party tonight meme game later lol thanks weekend pizza stream music photo movie homework coffee".split(" ");
+
+/** Made-up statistics for about `n` messages. */
+function fakeStats(n: number, complete: boolean): ScanStats {
+  const months: [string, number][] = [];
+  let left = n;
+  for (let m = 0; m < 18 && left > 0; m++) {
+    const d = new Date(2025, 2 + m, 1);
+    const count = Math.min(left, Math.round((n / 12) * (0.4 + Math.abs(Math.sin(m * 1.7)))));
+    months.push([`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`, count]);
+    left -= count;
+  }
+  const total = months.reduce((s, [, c]) => s + c, 0);
+  const week = Array.from({ length: 7 }, (_, d) =>
+    Array.from({ length: 24 }, (_, h) => Math.round((total / 300) * Math.max(0, Math.sin(((h - 8) / 24) * Math.PI * 2) + (d >= 5 ? 0.6 : 0.2)))),
+  );
+  return {
+    messages: total,
+    words: total * 7,
+    characters: total * 38,
+    with_files: Math.round(total * 0.12),
+    images: Math.round(total * 0.09),
+    videos: Math.round(total * 0.02),
+    audio: Math.round(total * 0.01),
+    links: Math.round(total * 0.08),
+    pinned_kept: complete ? 2 : 0,
+    first: months.length ? `${months[0][0]}-03T18:22:00Z` : null,
+    last: months.length ? `${months[months.length - 1][0]}-21T22:05:00Z` : null,
+    months,
+    week,
+    top_words: WORDS.map((w, i) => [w, Math.round(total / (i + 3))] as [string, number]),
+    top_emoji: [["😂", Math.round(total / 9)], ["👍", Math.round(total / 14)], ["🎉", Math.round(total / 30)]],
+    busiest_day: months.length ? [`${months[0][0]}-14`, Math.round(total / 40) + 3] : null,
+    longest: 1834,
+  };
+}
+
+/** Counts, then "reads" page by page, like the backend's scan. */
+async function mockScan(targets: Target[], filter: Filter, scanId: number) {
+  const send = (event: ScanEvent) => emit("scan-event", { ...event, scan_id: scanId });
+  const totals = new Map<string, number>();
+  for (const target of targets) {
+    if (job.cancelled) return send({ type: "finished", cancelled: true, error: null });
+    await send({ type: "activity", activity: { kind: "counting", target_id: target.id } });
+    await sleep(350);
+    if (target.id === "3005") {
+      await send({ type: "counted", target_id: target.id, total: 0, error: "Discord answered 403: Missing Access" });
+      continue;
+    }
+    const total = countFor(target, filter);
+    totals.set(target.id, total);
+    await send({ type: "counted", target_id: target.id, total, error: null });
+    const read = Math.min(25, total);
+    await send({ type: "read", target_id: target.id, read, matching: read, complete: read >= total });
+  }
+  let readAll = 0;
+  const all = [...totals.values()].reduce((a, b) => a + b, 0);
+  for (const [id, total] of totals) {
+    let read = Math.min(25, total);
+    readAll += read;
+    let page = 1;
+    while (read < total) {
+      if (job.cancelled) return send({ type: "finished", cancelled: true, error: null });
+      page++;
+      await send({ type: "activity", activity: { kind: "reading", target_id: id, page } });
+      if (page === 4) {
+        await send({ type: "notice", notice: { kind: "rate_limited", wait_ms: 2500, global: false } });
+        await sleep(2500);
+      }
+      await sleep(180);
+      const step = Math.min(25, total - read);
+      read += step;
+      readAll += step;
+      const done = read >= total;
+      const matching = done ? Math.round(total * 0.96) : read;
+      await send({ type: "read", target_id: id, read, matching, complete: done });
+      if (done) await send({ type: "counted", target_id: id, total: matching, error: null });
+      await send({ type: "stats", stats: fakeStats(readAll, readAll >= all) });
+    }
+  }
+  await send({ type: "stats", stats: fakeStats(all, true) });
+  await send({ type: "finished", cancelled: false, error: null });
+}
+
 /** A stopped mock run, to try "Continue" in the browser. */
 let unfinished: (UnfinishedRun & { filter: Filter }) | null = null;
 
@@ -162,6 +249,9 @@ async function simulate(
     await send({ type: "target_started", index, target_id: target.id, name: target.name });
     const count = countFor(target, filter);
     await send({ type: "target_estimate", target_id: target.id, total: count });
+    await send({ type: "activity", activity: { kind: "using_found", target_id: target.id, messages: count } });
+    await sleep(400);
+    await send({ type: "activity", activity: { kind: "deleting", target_id: target.id } });
     const stats: Stats = { deleted: 0, skipped: 0, failed: 0 };
     for (let i = 0; i < count; i++) {
       if (!(await checkpoint())) {
@@ -196,6 +286,11 @@ async function simulate(
           saved: [],
           dry_run: dryRun,
         });
+      }
+      if (!dryRun && i % 100 === 99) {
+        await send({ type: "activity", activity: { kind: "break", ms: 3000 } });
+        await sleep(3000);
+        await send({ type: "activity", activity: { kind: "deleting", target_id: target.id } });
       }
       if (!dryRun && i % 50 === 49) {
         await send({ type: "notice", notice: { kind: "rate_limited", wait_ms: 1500, global: false } });
@@ -271,21 +366,17 @@ export function installMockBackend() {
           await sleep(300);
           if (args.guildId === "3005") throw { kind: "other", message: "Discord answered 403: Missing Access" };
           return channelsOf(args.guildId);
-        case "preview": {
+        case "start_scan":
           job.cancelled = false;
-          const entries: PreviewEntry[] = [];
-          for (const target of args.targets as Target[]) {
-            await sleep(250);
-            if (job.cancelled) throw { kind: "cancelled", message: "cancelled" };
-            const entry: PreviewEntry =
-              target.id === "3005"
-                ? { target, count: null, error: "Discord answered 403: Missing Access" }
-                : { target, count: countFor(target, args.filter), error: null };
-            entries.push(entry);
-            await emit("preview-entry", entry);
-          }
-          return entries;
-        }
+          void mockScan(args.targets as Target[], args.filter as Filter, args.scanId as number);
+          return null;
+        case "stop_scan":
+          job.cancelled = true;
+          await sleep(100);
+          return null;
+        case "export_found":
+          await sleep(300);
+          return 57;
         case "plugin:dialog|save":
           return "/home/demo/Documents/erasecord-export.csv";
         case "export_run":
@@ -309,14 +400,17 @@ export function installMockBackend() {
         case "insights_search":
           return devInsights({ query: args.query, limit: args.limit, scope: args.scope });
         case "preview_package":
-          return (args.targets as Target[]).map((target) => {
+          return {
+            stats: fakeStats(400, true),
+            entries: (args.targets as Target[]).map((target) => {
             const item = fakePackage().targets.find((t) => t.target.id === target.id);
             const channels = item?.channels.filter((c) => !target.channels.length || target.channels.includes(c.id)) ?? [];
             let count = channels.reduce((sum, c) => sum + c.messages, 0);
             if (args.filter.after || args.filter.before) count = Math.round(count * 0.4);
             if (args.filter.content || args.filter.has.length) count = Math.round(count * 0.15);
             return { target, count, error: null };
-          });
+            }),
+          };
         case "unfinished_run":
           return unfinished;
         case "discard_run":
@@ -356,6 +450,11 @@ export function installMockBackend() {
           return { folder: args.into, files: 23, messages: 118 };
         case "start_package_job":
         case "start_job":
+          if (args.export) {
+            const ext = { csv: "csv", json: "json", json_lines: "jsonl" }[args.export.format as string];
+            const kind = args.options.dry_run ? "dry-run" : "deleted";
+            exportPath = `${args.export.dir}/erasecord-${kind}-20260927-181500.${ext}${args.backupPassphrase ? ".age" : ""}`;
+          } else exportPath = null;
           job.paused = false;
           job.cancelled = false;
           void simulate(
@@ -366,7 +465,7 @@ export function installMockBackend() {
             null,
             !!args.options.backup_dir && !!args.backupPassphrase,
           );
-          return null;
+          return exportPath;
         case "pause_job":
           job.paused = true;
           return null;

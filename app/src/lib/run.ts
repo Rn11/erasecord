@@ -2,7 +2,8 @@
 
 import { describeNotice, describeSkip, formatDate, messagePreview } from "./format";
 import { t } from "./i18n.svelte";
-import type { JobEvent, Stats, Summary, Target } from "./types";
+import type { Waiting } from "./status";
+import type { Activity, JobEvent, Stats, Summary, Target } from "./types";
 
 export type TargetStatus = "pending" | "running" | "done" | "stopped" | "failed";
 
@@ -41,6 +42,11 @@ export interface RunState {
   prior: Stats;
   /** The expected total is unknown up front and grows with each estimate. */
   growExpected: boolean;
+  /** What the run is doing right now, and what it waits for. */
+  activity: Activity | null;
+  waiting: Waiting | null;
+  /** Where the messages are exported to while the run goes. */
+  exportPath: string | null;
   /** What became of an encrypted backup. */
   backup: { archive: string; files: number; messages: number } | { folder: string; reason: string } | null;
 }
@@ -72,6 +78,9 @@ export function newRun(targets: Target[], expected: number, dryRun: boolean, res
     prior,
     growExpected: !!resume,
     backup: null,
+    activity: null,
+    waiting: null,
+    exportPath: null,
     currentId: null,
     startedAt: Date.now(),
     pausedAt: null,
@@ -152,7 +161,14 @@ export function applyEvent(run: RunState, event: JobEvent) {
       }
       break;
     case "notice":
+      run.waiting = { notice: event.notice, at: Date.now() };
       log(run, "warn", describeNotice(event.notice));
+      break;
+    case "activity":
+      run.activity = event.activity;
+      if (event.activity.kind === "break") {
+        log(run, "muted", t("log.break", { seconds: Math.ceil(event.activity.ms / 1000) }));
+      }
       break;
     case "backup_sealed":
       run.backup = { archive: event.archive, files: event.files, messages: event.messages };

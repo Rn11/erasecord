@@ -6,7 +6,10 @@
 
 <label class="language">
   <span class="sr-only">{t("common.language")}</span>
-  <span aria-hidden="true">🌐</span>
+  <svg class="icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9" />
+  </svg>
   <select
     value={i18n.choice}
     onchange={(event) => i18n.set(event.currentTarget.value as Choice)}
@@ -20,6 +23,14 @@
 </label>
 
 <style>
+  .icon {
+    flex: none;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+  }
+
   .language {
     display: inline-flex;
     align-items: center;

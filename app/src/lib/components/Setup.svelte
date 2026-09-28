@@ -14,7 +14,7 @@
   } from "$lib/format";
   import { num, t } from "$lib/i18n.svelte";
   import { loadPresets, savePresets, snapshot, withPreset, type Preset } from "$lib/presets";
-  import type { Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
+  import type { ExportSettings, Friend, GuildChannel, Has, JobOptions, PackageSummary, Target } from "$lib/types";
   import type { LastPackage } from "$lib/lastPackage";
   import { passphraseProblem, type PassphraseChoice } from "$lib/passphrase";
   import Passphrase from "./Passphrase.svelte";
@@ -49,6 +49,7 @@
     options = $bindable(),
     encrypt = $bindable(),
     passphrase = $bindable(),
+    exportTo = $bindable(),
     onOpenBackup,
     onReload,
     onCount,
@@ -82,6 +83,8 @@
     /** Encrypt the backup (the default). */
     encrypt: boolean;
     passphrase: PassphraseChoice | null;
+    /** Export the messages while deleting. */
+    exportTo: ExportSettings | null;
     onOpenBackup: () => void;
     onReload: () => void;
     onCount: () => void;
@@ -101,10 +104,11 @@
   const allVisibleSelected = $derived(visible.length > 0 && visible.every((t) => selected.has(t.id)));
   const selectedServers = $derived(servers.filter((t) => selected.has(t.id)).length);
   const selectedDms = $derived(dms.filter((t) => selected.has(t.id)).length);
+  const saves = $derived(options.backup_dir !== null || exportTo !== null);
   const problem = $derived(
     rangeProblem(range) ??
       contentProblem(content) ??
-      (options.backup_dir !== null && encrypt ? (passphrase ? passphraseProblem(passphrase) : t("pass.confirmNeeded")) : null),
+      (saves && encrypt ? (passphrase ? passphraseProblem(passphrase) : t("pass.confirmNeeded")) : null),
   );
   const summary = $derived(problem ? [] : filterLines(toFilter(range, skipPinned, content)));
   const contentActive = $derived(
@@ -134,6 +138,22 @@
   $effect(() => {
     for (const id of expanded) if (!channelLists.has(id)) onLoadChannels(id);
   });
+
+  async function chooseExportFolder(event?: Event) {
+    const checkbox = event?.currentTarget as HTMLInputElement | undefined;
+    if (checkbox && !checkbox.checked) {
+      exportTo = null;
+      return;
+    }
+    let folder: string | string[] | null = null;
+    try {
+      folder = await open({ directory: true, multiple: false, title: t("setup.exportPick") });
+    } catch {
+      folder = null;
+    }
+    if (typeof folder === "string") exportTo = { dir: folder, format: exportTo?.format ?? "csv" };
+    else if (checkbox) checkbox.checked = exportTo !== null;
+  }
 
   async function chooseBackupFolder(event?: Event) {
     const checkbox = event?.currentTarget as HTMLInputElement | undefined;
@@ -559,6 +579,10 @@
           <span class="small muted">{t("setup.overwriteHint")}</span>
         </div>
       {/if}
+    </fieldset>
+
+    <fieldset>
+      <legend>{t("setup.saving")}</legend>
       <label class="choice">
         <input type="checkbox" checked={options.backup_dir !== null} onchange={chooseBackupFolder} />
         <span>{t("setup.backup")}</span>
@@ -570,10 +594,35 @@
             <button type="button" class="link small" onclick={() => chooseBackupFolder()}>{t("setup.backupChange")}</button>
           </span>
           <span class="small muted">{encrypt ? t("setup.backupHintEncrypted") : t("setup.backupHint")}</span>
-          <label class="choice">
-            <input type="checkbox" bind:checked={encrypt} />
-            <span>{t("setup.encrypt")}</span>
+        </div>
+      {/if}
+      <label class="choice">
+        <input type="checkbox" checked={exportTo !== null} onchange={chooseExportFolder} />
+        <span>{t("setup.export")}</span>
+      </label>
+      {#if exportTo !== null}
+        <div class="indent field">
+          <span class="folder">
+            <code title={exportTo.dir}>{exportTo.dir}</code>
+            <button type="button" class="link small" onclick={() => chooseExportFolder()}>{t("setup.backupChange")}</button>
+          </span>
+          <label class="format small">
+            <span>{t("setup.exportFormat")}</span>
+            <select bind:value={exportTo.format}>
+              <option value="csv">{t("setup.formatCsv")}</option>
+              <option value="json">JSON</option>
+              <option value="json_lines">JSON Lines</option>
+            </select>
           </label>
+          <span class="small muted">{t("setup.exportHint")}</span>
+        </div>
+      {/if}
+      {#if saves}
+        <label class="choice">
+          <input type="checkbox" bind:checked={encrypt} />
+          <span>{t("setup.encrypt")}</span>
+        </label>
+        <div class="indent field">
           {#if encrypt && passphrase}
             <Passphrase bind:choice={passphrase} />
           {:else if !encrypt}
@@ -955,6 +1004,12 @@
 
   .warn-text {
     color: var(--warn);
+  }
+
+  .format {
+    display: flex;
+    gap: 8px;
+    align-items: center;
   }
 
   .open-backup {

@@ -29,8 +29,15 @@ export const defaultSettings = (): Settings => ({
   range: { mode: "older_than", amount: 30, unit: "days", from: "", to: "" },
   content: emptyContent(),
   skipPinned: true,
-  options: { delete_delay_ms: 1200, search_delay_ms: 2000, max_rounds: 3, overwrite: null, backup_dir: null },
+  // Well below Discord's limits; the backend adds random variation,
+  // breaks, and slows down further after rate limits.
+  options: { delete_delay_ms: 2500, search_delay_ms: 3000, max_rounds: 3, overwrite: null, backup_dir: null },
 });
+
+/** Settings saved with an old default get the new, calmer one. */
+function upgrade(value: number, oldDefault: number, newDefault: number): number {
+  return value === oldDefault ? newDefault : value;
+}
 
 function read(key: string): unknown {
   try {
@@ -80,8 +87,8 @@ function parseSettings(value: unknown): Settings {
     },
     skipPinned: pick(value.skipPinned, (v) => typeof v === "boolean", d.skipPinned),
     options: {
-      delete_delay_ms: pick(o.delete_delay_ms, isCount, d.options.delete_delay_ms),
-      search_delay_ms: pick(o.search_delay_ms, isCount, d.options.search_delay_ms),
+      delete_delay_ms: upgrade(pick(o.delete_delay_ms, isCount, d.options.delete_delay_ms), 1200, d.options.delete_delay_ms),
+      search_delay_ms: upgrade(pick(o.search_delay_ms, isCount, d.options.search_delay_ms), 2000, d.options.search_delay_ms),
       max_rounds: pick(o.max_rounds, isCount, d.options.max_rounds),
       overwrite: pick(o.overwrite, (v) => v === null || isString(v), null),
       backup_dir: pick(o.backup_dir, (v) => v === null || isString(v), null),

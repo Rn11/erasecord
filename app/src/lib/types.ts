@@ -122,6 +122,61 @@ export interface PreviewEntry {
   error: string | null;
 }
 
+/** Statistics about the messages found while counting. */
+export interface ScanStats {
+  messages: number;
+  words: number;
+  characters: number;
+  with_files: number;
+  images: number;
+  videos: number;
+  audio: number;
+  links: number;
+  pinned_kept: number;
+  first: string | null;
+  last: string | null;
+  months: [string, number][];
+  /** Weekday (Monday first) × hour, local time. */
+  week: number[][];
+  top_words: [string, number][];
+  top_emoji: [string, number][];
+  busiest_day: [string, number] | null;
+  longest: number;
+}
+
+/** What a clean-up or count is busy with. */
+export type Activity =
+  | { kind: "counting"; target_id: Snowflake }
+  | { kind: "reading"; target_id: Snowflake; page: number }
+  | { kind: "searching"; target_id: Snowflake; page: number; again: boolean }
+  | { kind: "using_found"; target_id: Snowflake; messages: number }
+  | { kind: "deleting"; target_id: Snowflake }
+  | { kind: "backing_up"; target_id: Snowflake }
+  | { kind: "checking_channel"; target_id: Snowflake }
+  | { kind: "break"; ms: number }
+  | { kind: "sealing_backup" };
+
+export type ScanEvent =
+  | { type: "counted"; target_id: Snowflake; total: number; error: string | null }
+  | { type: "read"; target_id: Snowflake; read: number; matching: number; complete: boolean }
+  | { type: "activity"; activity: Activity }
+  | { type: "notice"; notice: Notice }
+  | { type: "stats"; stats: ScanStats }
+  | { type: "finished"; cancelled: boolean; error: CommandError | null };
+
+export interface PackagePreview {
+  entries: PreviewEntry[];
+  stats: ScanStats;
+}
+
+export type ExportFormat = "csv" | "json" | "json_lines";
+
+/** Save the messages of a run into this folder while it goes. */
+export interface ExportSettings {
+  dir: string;
+  format: ExportFormat;
+}
+
 export interface LoginResult {
   user: User;
   remember_error: string | null;
@@ -156,6 +211,7 @@ export type JobEvent =
   | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
   | { type: "target_finished"; target_id: Snowflake; stats: Stats; complete: boolean }
   | { type: "notice"; notice: Notice }
+  | { type: "activity"; activity: Activity }
   | { type: "backup_sealed"; archive: string; files: number; messages: number }
   | { type: "backup_kept"; folder: string; reason: string }
   | ({ type: "finished" } & Summary);

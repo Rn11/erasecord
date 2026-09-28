@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::job::Event;
+use crate::models::Message;
 use crate::snowflake::Snowflake;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +116,29 @@ impl<W: Write> ExportWriter<W> {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Writes a message found before deleting (status `found`).
+    pub fn found(&mut self, target: &crate::targets::Target, message: &Message) -> io::Result<()> {
+        let attachments: Vec<String> = message
+            .attachments
+            .iter()
+            .filter_map(|a| a["url"].as_str().map(str::to_owned))
+            .collect();
+        let row = Row {
+            place: &target.name,
+            place_id: target.id.to_string(),
+            channel_id: message.channel_id.to_string(),
+            message_id: message.id.to_string(),
+            sent_at: message.id.created_at().to_rfc3339(),
+            status: "found",
+            content: &message.content,
+            attachments: &attachments,
+            saved_files: &[],
+        };
+        self.write_row(&row)?;
+        self.rows += 1;
         Ok(())
     }
 

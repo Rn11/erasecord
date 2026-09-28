@@ -1,11 +1,15 @@
 //! What the app keeps between commands: the logged-in session, the running
 //! job, and the remembered token.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use erasecord_core::insights::Index;
-use erasecord_core::{Client, Event, JobControl, Package, User};
+use erasecord_core::targets::{Friend, GuildChannel};
+use erasecord_core::{Client, Event, JobControl, MessageCache, Package, Snowflake, Target, User};
+use tokio::sync::watch;
 
 use crate::commands::CommandError;
 
@@ -29,6 +33,29 @@ pub struct AppState {
     /// The events of the last clean-up that an export needs: names and
     /// deleted messages.
     last_run: Mutex<Vec<Event>>,
+    /// Messages found while counting, reused by dry runs and clean-ups.
+    /// In memory only, like everything here.
+    pub messages: MessageCache,
+    /// Lists from Discord, so going back and forth does not ask again.
+    lists: Mutex<Lists>,
+    /// The running count, and whether it has stopped.
+    scan: Mutex<Option<(JobControl, watch::Receiver<bool>)>>,
+}
+
+/// How long lists of servers, DMs, channels and friends are kept.
+const LIST_TTL: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Default)]
+struct Lists {
+    targets: Option<(Instant, Vec<Target>)>,
+    channels: HashMap<Snowflake, (Instant, Vec<GuildChannel>)>,
+    friends: Option<(Instant, Vec<Friend>)>,
+}
+
+fn fresh<T: Clone>(entry: Option<&(Instant, T)>) -> Option<T> {
+    entry
+        .filter(|(at, _)| at.elapsed() < LIST_TTL)
+        .map(|(_, value)| value.clone())
 }
 
 impl AppState {
@@ -42,6 +69,61 @@ impl AppState {
 
     pub fn set_session(&self, session: Option<Session>) {
         *self.session.lock().unwrap() = session;
+        // Another account, or none: forget everything found for the last.
+        self.messages.clear();
+        *self.lists.lock().unwrap() = Lists::default();
+    }
+
+    pub fn cached_targets(&self) -> Option<Vec<Target>> {
+        fresh(self.lists.lock().unwrap().targets.as_ref())
+    }
+
+    pub fn cache_targets(&self, targets: Option<Vec<Target>>) {
+        self.lists.lock().unwrap().targets = targets.map(|t| (Instant::now(), t));
+    }
+
+    pub fn cached_channels(&self, guild: Snowflake) -> Option<Vec<GuildChannel>> {
+        fresh(self.lists.lock().unwrap().channels.get(&guild))
+    }
+
+    pub fn cache_channels(&self, guild: Snowflake, channels: Vec<GuildChannel>) {
+        self.lists
+            .lock()
+            .unwrap()
+            .channels
+            .insert(guild, (Instant::now(), channels));
+    }
+
+    pub fn cached_friends(&self) -> Option<Vec<Friend>> {
+        fresh(self.lists.lock().unwrap().friends.as_ref())
+    }
+
+    pub fn cache_friends(&self, friends: Option<Vec<Friend>>) {
+        self.lists.lock().unwrap().friends = friends.map(|f| (Instant::now(), f));
+    }
+
+    /// Forgets the lists, so the next ones come from Discord.
+    pub fn forget_lists(&self) {
+        *self.lists.lock().unwrap() = Lists::default();
+    }
+
+    /// Starts a count, stopping one that is still running.
+    pub async fn begin_scan(&self) -> (JobControl, watch::Sender<bool>) {
+        self.stop_scan().await;
+        let control = JobControl::new();
+        let (done, rx) = watch::channel(false);
+        *self.scan.lock().unwrap() = Some((control.clone(), rx));
+        (control, done)
+    }
+
+    /// Stops the running count and waits until it has stopped, so what it
+    /// found is complete in the cache.
+    pub async fn stop_scan(&self) {
+        let running = self.scan.lock().unwrap().take();
+        if let Some((control, mut done)) = running {
+            control.cancel();
+            let _ = done.wait_for(|done| *done).await;
+        }
     }
 
     pub fn begin_job(&self) -> Result<JobControl, CommandError> {

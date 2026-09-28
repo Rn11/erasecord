@@ -8,6 +8,7 @@ use erasecord_core::insights::{
     Index, Info, LinksReport, Overview, PlacesReport, Scope, SearchResult, Timeline, WordsReport,
 };
 use erasecord_core::job::{self, Event, Filter, JobOptions, PreviewEntry, Stats};
+use erasecord_core::scan::{self, ScanEvent, ScanStats};
 use erasecord_core::vault::{self, EncryptedBackupSettings, KeySlot, SecretString};
 use erasecord_core::{
     Client, ClientConfig, Error, ExportFormat, ExportWriter, Friend, GuildChannel, Package,
@@ -21,8 +22,8 @@ use crate::state::{token_store, AppState, Session};
 
 /// Carries [`Event`]s of a running clean-up.
 pub const JOB_EVENT: &str = "job-event";
-/// Carries each [`PreviewEntry`] as soon as it is counted.
-pub const PREVIEW_EVENT: &str = "preview-entry";
+/// Carries the [`ScanEvent`]s of a running count.
+pub const SCAN_EVENT: &str = "scan-event";
 
 #[derive(Debug, Serialize)]
 pub struct CommandError {
@@ -157,6 +158,7 @@ pub async fn logout(state: State<'_, AppState>) -> CommandResult<()> {
     if let Some(job) = state.job() {
         job.cancel();
     }
+    state.stop_scan().await;
     state.set_session(None);
     state.set_package(None);
     token_store::forget().await;
@@ -164,9 +166,23 @@ pub async fn logout(state: State<'_, AppState>) -> CommandResult<()> {
 }
 
 #[tauri::command]
-pub async fn list_targets(state: State<'_, AppState>) -> CommandResult<Vec<Target>> {
+/// The servers and DMs; from memory if asked for recently, unless
+/// `refresh`.
+pub async fn list_targets(
+    state: State<'_, AppState>,
+    refresh: Option<bool>,
+) -> CommandResult<Vec<Target>> {
     let session = state.session()?;
-    Ok(erasecord_core::list_targets(&session.client).await?)
+    if refresh == Some(true) {
+        // Asking Discord again means for the messages too.
+        state.forget_lists();
+        state.messages.clear();
+    } else if let Some(targets) = state.cached_targets() {
+        return Ok(targets);
+    }
+    let targets = erasecord_core::list_targets(&session.client).await?;
+    state.cache_targets(Some(targets.clone()));
+    Ok(targets)
 }
 
 #[tauri::command]
@@ -175,45 +191,163 @@ pub async fn list_channels(
     guild_id: Snowflake,
 ) -> CommandResult<Vec<GuildChannel>> {
     let session = state.session()?;
-    Ok(erasecord_core::list_channels(&session.client, guild_id).await?)
+    if let Some(channels) = state.cached_channels(guild_id) {
+        return Ok(channels);
+    }
+    let channels = erasecord_core::list_channels(&session.client, guild_id).await?;
+    state.cache_channels(guild_id, channels.clone());
+    Ok(channels)
 }
 
 #[tauri::command]
 pub async fn list_friends(state: State<'_, AppState>) -> CommandResult<Vec<Friend>> {
     let session = state.session()?;
-    Ok(erasecord_core::friends_without_dm(&session.client).await?)
+    if let Some(friends) = state.cached_friends() {
+        return Ok(friends);
+    }
+    let friends = erasecord_core::friends_without_dm(&session.client).await?;
+    state.cache_friends(Some(friends.clone()));
+    Ok(friends)
 }
 
 #[tauri::command]
 pub async fn open_dm(state: State<'_, AppState>, user_id: Snowflake) -> CommandResult<Target> {
     let session = state.session()?;
-    Ok(erasecord_core::open_dm(&session.client, user_id).await?)
+    let target = erasecord_core::open_dm(&session.client, user_id).await?;
+    // The DM is open now: both lists changed.
+    state.cache_targets(None);
+    state.cache_friends(None);
+    Ok(target)
 }
 
+/// Counts, then reads the matching messages in the background; progress
+/// and statistics arrive as [`SCAN_EVENT`]s, ending with `finished`. What it
+/// finds stays in memory for the dry run or clean-up that follows.
 #[tauri::command]
-pub async fn preview(
+pub async fn start_scan(
     app: AppHandle,
     state: State<'_, AppState>,
     targets: Vec<Target>,
     filter: Filter,
     options: JobOptions,
-) -> CommandResult<Vec<PreviewEntry>> {
+    scan_id: u64,
+) -> CommandResult<()> {
     let session = state.session()?;
-    let control = state.begin_job()?;
-    let result = job::preview(
-        &session.client,
-        session.me.id,
-        &targets,
-        &filter,
-        &options,
-        &control,
-        |_, entry| {
-            let _ = app.emit(PREVIEW_EVENT, entry);
-        },
-    )
-    .await;
-    state.end_job();
-    Ok(result?)
+    if state.job().is_some() {
+        return Err(CommandError::busy());
+    }
+    filter.compile()?;
+    let (control, done) = state.begin_scan().await;
+    let cache = state.messages.clone();
+    tauri::async_runtime::spawn(async move {
+        // Every event names its count, so the UI can ignore late events of
+        // one it has left.
+        let send = move |app: &AppHandle, event: &ScanEvent| {
+            if let Ok(serde_json::Value::Object(mut map)) = serde_json::to_value(event) {
+                map.insert("scan_id".into(), scan_id.into());
+                let _ = app.emit(SCAN_EVENT, map);
+            }
+        };
+        let emit = |event: ScanEvent| send(&app, &event);
+        let notices = app.clone();
+        session.client.set_notice_sink(Some(Arc::new(move |notice| {
+            send(&notices, &ScanEvent::Notice { notice });
+        })));
+        let result = scan::scan(
+            &session.client,
+            session.me.id,
+            &targets,
+            &filter,
+            &options,
+            &control,
+            &cache,
+            emit,
+        )
+        .await;
+        session.client.set_notice_sink(None);
+        let (cancelled, error) = match result {
+            Ok(()) => (false, None),
+            Err(Error::Cancelled) => (true, None),
+            Err(err) => (false, Some(CommandError::from(err))),
+        };
+        let _ = app.emit(
+            SCAN_EVENT,
+            serde_json::json!({
+                "type": "finished",
+                "scan_id": scan_id,
+                "cancelled": cancelled,
+                "error": error,
+            }),
+        );
+        let _ = done.send(true);
+    });
+    Ok(())
+}
+
+/// Stops reading messages; what was found so far is kept.
+#[tauri::command]
+pub async fn stop_scan(state: State<'_, AppState>) -> CommandResult<()> {
+    state.stop_scan().await;
+    Ok(())
+}
+
+/// Saves the messages found while counting to `path` (CSV, JSON or JSON
+/// Lines by its name, encrypted as `.age` with a passphrase), before
+/// anything is deleted. Returns how many were saved.
+#[tauri::command]
+pub async fn export_found(
+    state: State<'_, AppState>,
+    targets: Vec<Target>,
+    filter: Filter,
+    path: PathBuf,
+    passphrase: Option<PassphraseInput>,
+) -> CommandResult<u64> {
+    let session = state.session()?;
+    let found = scan::found_messages(&state.messages, session.me.id, &targets, &filter)?;
+    let passphrase = passphrase.map(PassphraseInput::resolve).transpose()?;
+    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
+        let format = ExportFormat::for_path(&plain_path(&path));
+        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
+        fn write_all<W: std::io::Write>(
+            writer: &mut ExportWriter<W>,
+            found: &[(Target, Vec<erasecord_core::Message>)],
+        ) -> std::io::Result<()> {
+            for (target, messages) in found {
+                for message in messages {
+                    writer.found(target, message)?;
+                }
+            }
+            Ok(())
+        }
+        match passphrase {
+            None => {
+                let mut writer = ExportWriter::new(file, format)?;
+                write_all(&mut writer, &found)?;
+                let rows = writer.rows();
+                writer.finish()?;
+                Ok(rows)
+            }
+            Some(passphrase) => {
+                let mut writer = ExportWriter::new(vault::encrypt(&passphrase, file)?, format)?;
+                write_all(&mut writer, &found)?;
+                let rows = writer.rows();
+                writer.finish()?.finish()?;
+                Ok(rows)
+            }
+        }
+    })
+    .await
+    .map_err(|err| CommandError::other(err.to_string()))?
+    .map_err(|err| CommandError::other(format!("could not save the file: {err}")))
+}
+
+/// `list.csv.age` is a CSV file, encrypted.
+fn plain_path(path: &std::path::Path) -> PathBuf {
+    if path.extension().is_some_and(|e| e == "age") {
+        path.with_extension("")
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// Starts deleting in the background; progress arrives as [`JOB_EVENT`]s.
@@ -225,13 +359,111 @@ pub async fn start_job(
     filter: Filter,
     options: JobOptions,
     backup_passphrase: Option<PassphraseInput>,
-) -> CommandResult<()> {
+    export: Option<ExportSettings>,
+) -> CommandResult<Option<PathBuf>> {
     let passphrase = backup_passphrase
         .map(PassphraseInput::resolve)
         .transpose()?;
+    state.stop_scan().await;
+    let export = open_export(export, options.dry_run, passphrase.clone()).await?;
+    let path = export.as_ref().map(|e| e.path.clone());
     spawn_job(
-        app, &state, None, targets, filter, options, None, passphrase,
-    )
+        app, &state, None, targets, filter, options, None, passphrase, export,
+    )?;
+    Ok(path)
+}
+
+/// Where and how to save the messages of a run while it goes.
+#[derive(Deserialize)]
+pub struct ExportSettings {
+    dir: PathBuf,
+    format: ExportFormat,
+}
+
+/// The export of a running clean-up, plain or encrypted.
+pub struct RunExport {
+    path: PathBuf,
+    writer: RunWriter,
+}
+
+enum RunWriter {
+    Plain(ExportWriter<std::io::BufWriter<std::fs::File>>),
+    Encrypted(ExportWriter<vault::StreamWriter<std::io::BufWriter<std::fs::File>>>),
+}
+
+impl RunExport {
+    fn observe(&mut self, event: &Event) -> std::io::Result<()> {
+        match &mut self.writer {
+            RunWriter::Plain(w) => w.observe(event),
+            RunWriter::Encrypted(w) => w.observe(event),
+        }
+    }
+
+    fn finish(self) -> std::io::Result<()> {
+        match self.writer {
+            RunWriter::Plain(w) => w.finish().map(drop),
+            RunWriter::Encrypted(w) => w.finish()?.finish().map(drop),
+        }
+    }
+}
+
+/// Creates the export file before anything is deleted, so a folder that
+/// cannot be written stops the run first: `erasecord-deleted-<time>.csv`
+/// (or `-dry-run-`), with `.age` when encrypted.
+async fn open_export(
+    settings: Option<ExportSettings>,
+    dry_run: bool,
+    passphrase: Option<SecretString>,
+) -> CommandResult<Option<RunExport>> {
+    let Some(settings) = settings else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<RunExport> {
+        std::fs::create_dir_all(&settings.dir)?;
+        let ext = match settings.format {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::JsonLines => "jsonl",
+        };
+        let kind = if dry_run { "dry-run" } else { "deleted" };
+        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+        let age = if passphrase.is_some() { ".age" } else { "" };
+        // Never overwrite an earlier export, even from the same second.
+        let (path, file) = (1..)
+            .map(|n| {
+                let suffix = if n == 1 {
+                    String::new()
+                } else {
+                    format!("-{n}")
+                };
+                settings
+                    .dir
+                    .join(format!("erasecord-{kind}-{stamp}{suffix}.{ext}{age}"))
+            })
+            .take(100)
+            .find_map(|path| {
+                std::fs::File::options()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .ok()
+                    .map(|file| (path, file))
+            })
+            .ok_or_else(|| std::io::Error::other("no free file name"))?;
+        let file = std::io::BufWriter::new(file);
+        let writer = match passphrase {
+            None => RunWriter::Plain(ExportWriter::new(file, settings.format)?),
+            Some(passphrase) => RunWriter::Encrypted(ExportWriter::new(
+                vault::encrypt(&passphrase, file)?,
+                settings.format,
+            )?),
+        };
+        Ok(RunExport { path, writer })
+    })
+    .await
+    .map_err(|err| CommandError::other(err.to_string()))?
+    .map(Some)
+    .map_err(|err| CommandError::other(format!("cannot create the export file: {err}")))
 }
 
 /// A passphrase as typed, or the file it is in (its first line).
@@ -283,13 +515,16 @@ pub async fn start_package_job(
     filter: Filter,
     options: JobOptions,
     backup_passphrase: Option<PassphraseInput>,
-) -> CommandResult<()> {
+    export: Option<ExportSettings>,
+) -> CommandResult<Option<PathBuf>> {
     let package = state.package().ok_or_else(CommandError::no_package)?;
     // The package may have been opened before logging in.
     package.0.check_owner(state.session()?.me.id)?;
     let passphrase = backup_passphrase
         .map(PassphraseInput::resolve)
         .transpose()?;
+    let export = open_export(export, options.dry_run, passphrase.clone()).await?;
+    let path = export.as_ref().map(|e| e.path.clone());
     spawn_job(
         app,
         &state,
@@ -299,7 +534,9 @@ pub async fn start_package_job(
         options,
         None,
         passphrase,
-    )
+        export,
+    )?;
+    Ok(path)
 }
 
 /// Starts a clean-up. `saved` continues an earlier one. Real runs keep their
@@ -315,6 +552,7 @@ fn spawn_job(
     mut options: JobOptions,
     saved: Option<SavedRun>,
     backup_passphrase: Option<SecretString>,
+    mut export: Option<RunExport>,
 ) -> CommandResult<()> {
     let session = state.session()?;
     // A new encrypted backup: its folder and key are made before anything
@@ -360,6 +598,7 @@ fn spawn_job(
         };
     let control = state.begin_job()?;
     state.clear_last_run();
+    let cache = state.messages.clone();
     tauri::async_runtime::spawn(async move {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let (client, me) = (&session.client, session.me.id);
@@ -371,7 +610,19 @@ fn spawn_job(
                     )
                     .await
                 }
-                None => job::run(client, me, &targets, &filter, &options, &control, tx).await,
+                None => {
+                    job::run_with_cache(
+                        client,
+                        me,
+                        &targets,
+                        &filter,
+                        &options,
+                        &control,
+                        Some(&cache),
+                        tx,
+                    )
+                    .await
+                }
             }
         };
         let forward = async {
@@ -398,9 +649,17 @@ fn spawn_job(
                         backup_list = None;
                     }
                 }
+                if let Some(file) = export.as_mut() {
+                    if file.observe(&event).is_err() {
+                        export = None;
+                    }
+                }
                 if matches!(event, Event::Finished(_)) {
                     if let Some(list) = backup_list.take() {
                         let _ = list.finish();
+                    }
+                    if let Some(file) = export.take() {
+                        let _ = file.finish();
                     }
                 }
                 if matches!(event, Event::Finished(_)) {
@@ -470,6 +729,7 @@ pub async fn resume_run(
         CommandError::other(format!("cannot read the unfinished clean-up: {err}"))
     })?;
     let session = state.session()?;
+    state.stop_scan().await;
     let package = match &saved.package {
         Some(path) => {
             let source = path.clone();
@@ -508,6 +768,7 @@ pub async fn resume_run(
         filter,
         options,
         Some(saved),
+        None,
         None,
     )?;
     Ok(info)
@@ -660,16 +921,25 @@ pub async fn preview_package(
     state: State<'_, AppState>,
     targets: Vec<Target>,
     filter: Filter,
-) -> CommandResult<Vec<PreviewEntry>> {
+) -> CommandResult<PackagePreview> {
     let session = state.session()?;
     let (package, _) = state.package().ok_or_else(CommandError::no_package)?;
     package.check_owner(session.me.id)?;
-    Ok(job::preview_package(
-        &package,
-        session.me.id,
-        &targets,
-        &filter,
-    )?)
+    let me = session.me.id;
+    tauri::async_runtime::spawn_blocking(move || -> CommandResult<PackagePreview> {
+        Ok(PackagePreview {
+            entries: job::preview_package(&package, me, &targets, &filter)?,
+            stats: scan::package_stats(&package, me, &targets, &filter)?,
+        })
+    })
+    .await
+    .map_err(|err| CommandError::other(err.to_string()))?
+}
+
+#[derive(Serialize)]
+pub struct PackagePreview {
+    entries: Vec<PreviewEntry>,
+    stats: ScanStats,
 }
 
 /// Runs an Insights query on the package's index, off the main thread.

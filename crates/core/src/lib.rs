@@ -12,13 +12,17 @@ pub mod delete;
 pub mod error;
 pub mod export;
 pub mod filter;
+#[cfg(test)]
+mod fuzz_tests;
 pub mod insights;
 pub mod inspect;
 pub mod job;
 pub mod models;
+pub mod pace;
 pub mod package;
 mod ratelimit;
 pub mod resume;
+pub mod scan;
 pub mod search;
 pub mod snowflake;
 mod stopwords;
@@ -30,10 +34,11 @@ pub use delete::SkipReason;
 pub use error::{Error, Result};
 pub use export::{ExportFormat, ExportWriter};
 pub use filter::{Filter, Has};
-pub use job::{Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
+pub use job::{Activity, Event, JobControl, JobOptions, PreviewEntry, Stats, Summary};
 pub use models::{Message, User};
 pub use package::{Package, PackageTarget};
 pub use resume::{Checkpoint, SavedRun};
+pub use scan::{MessageCache, ScanEvent, ScanStats};
 pub use snowflake::Snowflake;
 pub use targets::{
     friends_without_dm, list_channels, list_targets, open_dm, Friend, GuildChannel, Target,

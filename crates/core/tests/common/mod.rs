@@ -79,6 +79,11 @@ pub struct State {
     pub messages: Vec<FakeMessage>,
     /// Deleted messages keep appearing in search results.
     pub stale_index: bool,
+    /// Answers searches and deletes at random with errors, rate limits,
+    /// "index not ready" and broken bodies, this share of the time.
+    pub chaos: Option<(rand::rngs::StdRng, f64)>,
+    /// Search ignores `max_id` and always answers the first page.
+    pub ignore_cursor: bool,
     stale: Vec<FakeMessage>,
     /// Message ID -> (HTTP status, Discord error code) returned on delete.
     pub delete_errors: HashMap<u64, (u16, u64)>,
@@ -310,6 +315,9 @@ impl Respond for SearchResponder {
         let mut state = self.0.lock().unwrap();
         state.search_calls += 1;
         let calls = state.search_calls;
+        if let Some(chaos) = chaos(&mut state) {
+            return chaos;
+        }
 
         let segments: Vec<&str> = request.url.path().split('/').collect();
         let (scope, scope_id) = (segments[3], segments[4].parse::<u64>().unwrap());
@@ -334,7 +342,7 @@ impl Respond for SearchResponder {
         let (author, min, max) = (
             id_param("author_id"),
             id_param("min_id"),
-            id_param("max_id"),
+            id_param("max_id").filter(|_| !state.ignore_cursor),
         );
 
         let mut found: Vec<&FakeMessage> = state
@@ -377,6 +385,9 @@ impl Respond for DeleteResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let mut state = self.0.lock().unwrap();
         state.delete_calls += 1;
+        if let Some(chaos) = chaos(&mut state) {
+            return chaos;
+        }
         let segments: Vec<&str> = request.url.path().split('/').collect();
         let channel_id: u64 = segments[4].parse().unwrap();
         let message_id: u64 = segments[6].parse().unwrap();
@@ -517,4 +528,22 @@ impl Respond for EditResponder {
             None => error_json(404, 10008, "Unknown Message"),
         }
     }
+}
+
+/// A random failure, if chaos is on and it is time for one.
+fn chaos(state: &mut State) -> Option<ResponseTemplate> {
+    use rand::RngExt;
+    let (rng, rate) = state.chaos.as_mut()?;
+    if !rng.random_bool(*rate) {
+        return None;
+    }
+    Some(match rng.random_range(0..5) {
+        0 => error_json(500, 0, "Internal Server Error"),
+        1 => ResponseTemplate::new(429)
+            .set_body_json(json!({ "message": "You are being rate limited.", "retry_after": 0.001, "global": false })),
+        2 => ResponseTemplate::new(202)
+            .set_body_json(json!({ "message": "Index not yet available.", "code": 110000, "retry_after": 0.001 })),
+        3 => ResponseTemplate::new(502).set_body_string("<html>Bad Gateway</html>"),
+        _ => ResponseTemplate::new(200).set_body_string("{\"total_results\": 3, \"messages\": [[{\"id\""),
+    })
 }

@@ -1,81 +1,106 @@
 <script lang="ts">
-  import { checksLocally, describePlaces, filterLines, targetLabel } from "$lib/format";
+  import { checksLocally, describePlaces, filterLines, formatDuration, targetLabel } from "$lib/format";
   import { num, t } from "$lib/i18n.svelte";
-  import type { Filter, PreviewEntry, Target } from "$lib/types";
+  import { allCounted, allRead, countOf, deleteTimeMs, readProgress, totalOf, type ScanState } from "$lib/scan";
+  import type { Filter, JobOptions, PassphraseInput } from "$lib/types";
   import Avatar from "./Avatar.svelte";
+  import ConfirmDelete from "./ConfirmDelete.svelte";
+  import ExportPanel from "./ExportPanel.svelte";
+  import ScanStatsView from "./ScanStatsView.svelte";
+  import StatusLine from "./StatusLine.svelte";
 
   let {
-    targets,
-    entries,
-    counting,
-    exact = false,
-    error,
+    scan,
     filter,
+    options,
+    saving,
+    passphrase,
     onBack,
-    onCancel,
+    onStop,
     onStart,
+    onExport,
   }: {
-    targets: Target[];
-    entries: PreviewEntry[];
-    counting: boolean;
-    /** Counts come from the data package: exact, no search involved. */
-    exact?: boolean;
-    error: string | null;
+    scan: ScanState;
     filter: Filter;
+    options: JobOptions;
+    /** What is saved before deleting, as set up. */
+    saving: { backup: boolean; export: boolean };
+    /** The passphrase set up for this clean-up, if any. */
+    passphrase: PassphraseInput | null;
     onBack: () => void;
-    onCancel: () => void;
+    onStop: () => void;
     onStart: (dryRun: boolean) => void;
+    onExport: (path: string, passphrase: PassphraseInput | null) => Promise<number>;
   } = $props();
 
-  let dialog: HTMLDialogElement | undefined = $state();
+  let confirm: ConfirmDelete | undefined = $state();
+  let exporting = $state(false);
 
-  const byId = $derived(new Map(entries.map((e) => [e.target.id, e])));
-  const total = $derived(entries.reduce((sum, e) => sum + (e.count ?? 0), 0));
-  const withMatches = $derived(entries.filter((e) => (e.count ?? 0) > 0));
+  const names = $derived(new Map(scan.targets.map((t) => [t.id, t.name])));
+  const placeName = (id: string) => names.get(id) ?? "";
+  const total = $derived(totalOf(scan));
+  const counted = $derived(allCounted(scan));
+  const read = $derived(allRead(scan));
+  const progress = $derived(readProgress(scan));
+  const withMatches = $derived(scan.targets.filter((t) => countOf(scan.places[t.id]) > 0));
   const places = $derived(
     describePlaces(
-      withMatches.filter((e) => e.target.kind === "guild").length,
-      withMatches.filter((e) => e.target.kind !== "guild").length,
+      withMatches.filter((t) => t.kind === "guild").length,
+      withMatches.filter((t) => t.kind !== "guild").length,
     ),
   );
   const conditions = $derived(filterLines(filter));
-  const failures = $derived(entries.filter((e) => e.error).length);
-  const approximate = $derived(!exact && checksLocally(filter));
-  const upTo = $derived(approximate || filter.skip_pinned);
-
-  function confirmDelete() {
-    dialog?.close();
-    onStart(false);
-  }
+  const failures = $derived(scan.targets.filter((t) => scan.places[t.id]?.error).length);
+  // Before everything is read, Discord's numbers include what local checks
+  // would keep.
+  const upTo = $derived(!read && (checksLocally(filter) || filter.skip_pinned));
+  const unreadPages = $derived(Math.ceil(Math.max(0, progress.of - progress.read) / 25));
+  const readLeftMs = $derived(unreadPages * (options.search_delay_ms + 600));
+  const deleteMs = $derived(deleteTimeMs(total, options, read ? 0 : unreadPages));
+  const title = $derived.by(() => {
+    if (!counted) return t("preview.counting");
+    if (scan.running) return t("preview.reading");
+    return t("preview.title");
+  });
 </script>
 
 <section class="card preview">
   <header>
     <div>
-      <h2>{counting ? t("preview.counting") : t("preview.title")}</h2>
-      <p class="muted">{t("preview.intro")}</p>
+      <h2>{title}</h2>
       <ul class="conditions muted small">
         {#each conditions as line, i (i)}<li>{line}</li>{/each}
       </ul>
     </div>
-    {#if counting}
-      <span class="muted small num">{num(entries.length)} / {num(targets.length)}</span>
+    {#if scan.running}
+      <button class="btn small" onclick={onStop} title={t("preview.stopHint")}>{t("preview.stop")}</button>
     {/if}
   </header>
 
+  <StatusLine activity={scan.activity} waiting={scan.waiting} {placeName} busy={scan.running} />
+
   <div class="table" role="table">
-    {#each targets as target (target.id)}
-      {@const entry = byId.get(target.id)}
+    {#each scan.targets as target (target.id)}
+      {@const p = scan.places[target.id]}
       <div class="row" role="row">
         <Avatar name={target.name} url={target.icon_url} size={24} />
-        <span class="name" role="cell">{targetLabel(target)}</span>
+        <span class="name" role="cell">
+          {targetLabel(target)}
+          {#if p && !p.complete && !p.error && (p.total ?? 0) > 0}
+            <span class="read" aria-hidden="true">
+              <span style:width="{Math.min(100, (p.read / Math.max(p.total ?? 1, 1)) * 100)}%"></span>
+            </span>
+          {/if}
+        </span>
         <span class="value num" role="cell">
-          {#if !entry}
-            {#if counting}<span class="spinner muted"></span>{/if}
-          {:else if entry.error}
-            <span class="failed" title={entry.error}>{t("preview.couldNotSearch")}</span>
+          {#if !p || (p.total === null && !p.error)}
+            {#if scan.running}<span class="spinner muted"></span>{/if}
+          {:else if p.error}
+            <span class="failed" title={p.error}>{t("preview.couldNotSearch")}</span>
           {:else}
-            <span class:zero={entry.count === 0}>{num(entry.count ?? 0)}</span>
+            <span class:zero={countOf(p) === 0} title={p.complete ? t("preview.exact") : t("preview.estimate")}>
+              {p.complete || scan.exact ? "" : "≈ "}{num(countOf(p))}
+            </span>
           {/if}
         </span>
       </div>
@@ -84,56 +109,75 @@
 
   <div class="total">
     <span>{t("preview.total")}</span>
-    <span class="num">{num(total)}</span>
+    <span class="num">{read || scan.exact ? "" : "≈ "}{num(total)}</span>
   </div>
 
-  {#if error}
-    <p class="callout error small">{error}</p>
+  {#if !scan.exact && counted && !read && progress.of > 0}
+    <div class="reading small muted">
+      <div class="bar" aria-hidden="true"><span style:width="{(progress.read / progress.of) * 100}%"></span></div>
+      <span>
+        {t("preview.readOf", { read: num(progress.read), of: num(progress.of) })}
+        {#if scan.running && readLeftMs > 0}· {t("preview.left", { time: formatDuration(readLeftMs) })}{/if}
+      </span>
+    </div>
   {/if}
-  {#if !counting && failures > 0}
+
+  {#if scan.error}
+    <p class="callout error small">{scan.error}</p>
+  {/if}
+  {#if counted && failures > 0}
     <p class="callout warn small">{t("preview.failures", { count: failures })}</p>
   {/if}
-  {#if !counting && filter.skip_pinned && total > 0}
-    <p class="small muted">{t("preview.pinnedNote")}</p>
+  {#if !scan.running && !read && !scan.exact && total > 0}
+    <p class="small muted">{t("preview.partialNote")}</p>
   {/if}
-  {#if !counting && exact && total > 0}
+  {#if scan.exact && total > 0}
     <p class="small muted">{t("preview.packageNote")}</p>
   {/if}
-  {#if !counting && approximate && total > 0}
-    <p class="small muted">{t("preview.approxNote")}</p>
+
+  {#if scan.stats && scan.stats.messages > 0}
+    <ScanStatsView stats={scan.stats} partial={!read} deleteMs={counted ? deleteMs : null} />
+  {/if}
+
+  {#if exporting}
+    <ExportPanel
+      name="erasecord-found-{new Date().toISOString().slice(0, 10)}"
+      knownPassphrase={passphrase}
+      write={onExport}
+      onClose={() => (exporting = false)}
+    />
+  {/if}
+
+  {#if counted && total > 0 && (saving.backup || saving.export)}
+    <p class="small muted">
+      {saving.backup && saving.export ? t("preview.savingBoth") : saving.backup ? t("preview.savingBackup") : t("preview.savingExport")}
+    </p>
   {/if}
 
   <footer>
-    {#if counting}
-      <button class="btn" onclick={onCancel}>{t("common.cancel")}</button>
-    {:else}
-      <button class="btn" onclick={onBack}>{t("common.back")}</button>
-      <span class="spacer"></span>
-      <button class="btn" onclick={() => onStart(true)} disabled={total === 0}>{t("preview.dryRun")}</button>
-      <button class="btn danger" onclick={() => dialog?.showModal()} disabled={total === 0}>
-        {total === 0 ? t("preview.nothing") : t(upTo ? "preview.deleteUpTo" : "preview.delete", { count: total })}
-      </button>
+    <button class="btn" onclick={onBack}>{t("common.back")}</button>
+    <span class="spacer"></span>
+    {#if !scan.exact}
+      <button
+        class="btn"
+        onclick={() => (exporting = true)}
+        disabled={exporting || (scan.stats?.messages ?? 0) === 0}
+        title={t("preview.exportHint")}>{t("preview.export")}</button
+      >
     {/if}
+    <button class="btn" onclick={() => onStart(true)} disabled={!counted || total === 0}>{t("preview.dryRun")}</button>
+    <button class="btn danger" onclick={() => confirm?.open()} disabled={!counted || total === 0}>
+      {total === 0 && counted ? t("preview.nothing") : t(upTo ? "preview.deleteUpTo" : "preview.delete", { count: total })}
+    </button>
   </footer>
 </section>
 
-<dialog bind:this={dialog} class="card confirm" aria-labelledby="confirm-title">
-  <h2 id="confirm-title">{t(upTo ? "confirm.titleUpTo" : "confirm.title", { count: total })}</h2>
-  <ul class="conditions small">
-    {#each conditions as line, i (i)}<li>{line}</li>{/each}
-  </ul>
-  <p>{t("confirm.body", { places })} <strong>{t("confirm.undo")}</strong></p>
-  <p class="muted small">{t("confirm.slow")}</p>
-  <div class="actions">
-    <button class="btn" onclick={() => dialog?.close()}>{t("common.cancel")}</button>
-    <button class="btn danger" onclick={confirmDelete}>{t("confirm.go")}</button>
-  </div>
-</dialog>
+<ConfirmDelete bind:this={confirm} count={total} {upTo} {places} {filter} onConfirm={() => onStart(false)} />
 
 <style>
   .preview {
     width: 100%;
-    max-width: 720px;
+    max-width: 860px;
     margin: 0 auto;
     padding: 20px;
     display: grid;
@@ -152,6 +196,10 @@
     gap: 4px;
   }
 
+  h2 {
+    margin: 0;
+  }
+
   .conditions {
     margin: 0;
     padding-left: 18px;
@@ -160,7 +208,7 @@
   .table {
     border: 1px solid var(--border);
     border-radius: 10px;
-    max-height: 48vh;
+    max-height: 36vh;
     overflow-y: auto;
   }
 
@@ -182,6 +230,25 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    display: grid;
+    gap: 4px;
+  }
+
+  .read {
+    display: block;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--panel-2);
+    overflow: hidden;
+    max-width: 220px;
+  }
+
+  .read span,
+  .bar span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.3s;
   }
 
   .value {
@@ -210,6 +277,22 @@
     font-size: 16px;
   }
 
+  .reading {
+    display: grid;
+    gap: 4px;
+  }
+
+  .bar {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--panel-2);
+    overflow: hidden;
+  }
+
+  p {
+    margin: 0;
+  }
+
   footer {
     display: flex;
     gap: 8px;
@@ -221,30 +304,10 @@
     flex: 1;
   }
 
-  .confirm {
-    width: min(440px, calc(100% - 32px));
-    /* WebKitGTK would otherwise stretch the modal to the full window height. */
-    height: fit-content;
-    max-height: calc(100vh - 32px);
-    padding: 22px;
-    color: var(--text);
-    border: 1px solid var(--border);
-  }
-
-  .confirm[open] {
-    display: grid;
-    align-content: start;
-    gap: 12px;
-  }
-
-  .confirm::backdrop {
-    background: rgb(0 0 0 / 0.45);
-  }
-
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 6px;
+  @media (prefers-reduced-motion: reduce) {
+    .read span,
+    .bar span {
+      transition: none;
+    }
   }
 </style>
