@@ -550,13 +550,15 @@ impl<R: Rng> Anonymizer<R> {
     }
 
     /// IDs in folder names are replaced like everywhere else; parts that are
-    /// not plain words become placeholders.
+    /// not plain words become placeholders, and so do `.` and `..`, so the
+    /// copy never unpacks outside its folder.
     fn path(&mut self, name: &str) -> String {
         name.split(['/', '\\'])
             .filter(|p| !p.is_empty())
             .map(|part| {
                 let replaced = self.ids_in(part);
                 let plain = replaced.len() <= 80
+                    && replaced.chars().any(|c| c != '.')
                     && replaced
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c));
@@ -739,6 +741,14 @@ mod tests {
         let b = anon.text("<@222222222222222222>");
         assert_eq!(a, b);
         assert_eq!(anon.label("general in Rust"), "name1 in name2");
+    }
+
+    #[test]
+    fn paths_stay_inside_the_copy() {
+        let mut anon = Anonymizer::new(StdRng::seed_from_u64(1));
+        let path = anon.path("../../../.bashrc/./messages/index.json");
+        assert!(path.split('/').all(|p| p != ".." && p != "."), "{path}");
+        assert!(path.ends_with("/messages/index.json"), "{path}");
     }
 
     #[test]

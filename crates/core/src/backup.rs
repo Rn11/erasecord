@@ -276,13 +276,15 @@ fn file_name_of(url: &str) -> String {
 }
 
 /// A file name that is valid everywhere: no path separators or characters
-/// Windows rejects, not empty, at most 100 characters.
+/// Windows rejects, not empty, at most 100 characters. Characters that
+/// reverse or hide text are replaced too, so `photo<U+202E>gpj.exe` cannot
+/// pass itself off as `photoexe.jpg`.
 fn safe_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {
             '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
-            c if c.is_control() => '_',
+            c if c.is_control() || is_invisible(c) => '_',
             c => c,
         })
         .collect();
@@ -299,6 +301,18 @@ fn safe_file_name(name: &str) -> String {
         }
         _ => cleaned.chars().take(100).collect(),
     }
+}
+
+/// Direction marks and overrides, and zero-width characters.
+pub fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 #[cfg(test)]
@@ -327,6 +341,9 @@ mod tests {
         assert_eq!(safe_file_name("../../etc/passwd"), "_.._etc_passwd");
         assert_eq!(safe_file_name("a:b*c?.txt"), "a_b_c_.txt");
         assert_eq!(safe_file_name("..."), "file");
+        // Shown as "photoexe.jpg" if the override were kept.
+        assert_eq!(safe_file_name("photo\u{202E}gpj.exe"), "photo_gpj.exe");
+        assert_eq!(safe_file_name("a\u{200B}b\u{2066}c.txt"), "a_b_c.txt");
         let long = format!("{}.jpeg", "x".repeat(300));
         let short = safe_file_name(&long);
         assert_eq!(short.chars().count(), 100);
