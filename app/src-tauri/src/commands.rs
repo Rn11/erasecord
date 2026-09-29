@@ -361,6 +361,11 @@ pub async fn start_job(
     backup_passphrase: Option<PassphraseInput>,
     export: Option<ExportSettings>,
 ) -> CommandResult<Option<PathBuf>> {
+    // Before anything is created or saved: a second run must not touch the
+    // running one's progress file.
+    if state.job().is_some() {
+        return Err(CommandError::busy());
+    }
     let passphrase = backup_passphrase
         .map(PassphraseInput::resolve)
         .transpose()?;
@@ -517,6 +522,9 @@ pub async fn start_package_job(
     backup_passphrase: Option<PassphraseInput>,
     export: Option<ExportSettings>,
 ) -> CommandResult<Option<PathBuf>> {
+    if state.job().is_some() {
+        return Err(CommandError::busy());
+    }
     let package = state.package().ok_or_else(CommandError::no_package)?;
     // The package may have been opened before logging in.
     package.0.check_owner(state.session()?.me.id)?;
@@ -633,7 +641,8 @@ fn spawn_job(
                     saved.checkpoint.observe(&event);
                     unsaved += 1;
                     if let Event::Finished(summary) = &event {
-                        if summary.error.is_none() && !summary.cancelled {
+                        // A server or DM whose search failed is not done yet.
+                        if summary.error.is_none() && !summary.cancelled && saved.remaining() == 0 {
                             let _ = std::fs::remove_file(file);
                         } else {
                             let _ = saved.save(file);
@@ -723,6 +732,9 @@ pub async fn resume_run(
     state: State<'_, AppState>,
     passphrase: Option<PassphraseInput>,
 ) -> CommandResult<UnfinishedRun> {
+    if state.job().is_some() {
+        return Err(CommandError::busy());
+    }
     let file =
         run_state_file(&app).ok_or_else(|| CommandError::other("no app data folder".into()))?;
     let saved = SavedRun::load(&file).map_err(|err| {

@@ -1231,7 +1231,8 @@ async fn delete(plan: Plan) -> Result<ExitCode> {
         summary.stats.deleted, progress.deleted_label, summary.stats.skipped, summary.stats.failed
     );
     if let Some((file, saved)) = &state {
-        let complete = summary.error.is_none() && !summary.cancelled;
+        // A server or DM whose search failed is not done yet.
+        let complete = summary.error.is_none() && !summary.cancelled && saved.remaining() == 0;
         if complete {
             let _ = std::fs::remove_file(file);
             println!("Everything is done; removed {}.", file.display());

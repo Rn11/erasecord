@@ -580,6 +580,9 @@ async fn run_from(
     };
     let mut total = Stats::default();
     let mut stopped_by = None;
+    // Every server and DM was done completely; otherwise the run can be
+    // continued, and an encrypted backup stays open for it.
+    let mut all_complete = true;
     for (index, target) in targets.iter().enumerate() {
         if job.resume().is_some_and(|r| r.is_finished(target.id)) {
             continue;
@@ -605,6 +608,7 @@ async fn run_from(
         }
         total.add(stats);
         let complete = result.is_ok();
+        all_complete &= complete;
         match result {
             Ok(()) => {}
             Err(err @ (Error::Unauthorized | Error::Cancelled)) => stopped_by = Some(err),
@@ -629,7 +633,12 @@ async fn run_from(
         let _ = events.send(Event::Activity {
             activity: Activity::SealingBackup,
         });
-        let finished = stopped_by.is_none();
+        let finished = stopped_by.is_none() && all_complete;
+        let reason = if stopped_by.is_some() {
+            "the clean-up was stopped; continue it to finish the backup"
+        } else {
+            "not every server or DM could be searched; continue the clean-up to finish the backup"
+        };
         let outcome = tokio::task::spawn_blocking(move || {
             if finished {
                 vault.seal().map(Ok)
@@ -646,7 +655,7 @@ async fn run_from(
             },
             Ok(Ok(Err(folder))) => Event::BackupKept {
                 folder,
-                reason: "the clean-up was stopped; continue it to finish the backup".into(),
+                reason: reason.into(),
             },
             Ok(Err(reason)) => Event::BackupKept {
                 folder: options

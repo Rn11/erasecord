@@ -1362,6 +1362,39 @@ async fn a_stopped_encrypted_backup_is_finished_by_continuing() {
     assert!(!settings.parts.exists());
 }
 
+#[tokio::test]
+async fn a_failing_target_keeps_the_encrypted_backup_open_for_continuing() {
+    let mut state = State::with_messages(photos(2));
+    state.messages.push(FakeMessage::in_guild(5, 0, ME));
+    state.forbidden_guilds.push(GUILD);
+    let fake = FakeDiscord::start(state).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = encrypted_options(dir.path(), "pass");
+    let settings = options.backup_encryption.clone().unwrap();
+
+    let (summary, events) = run_job_within(
+        &fake,
+        &[dm_target(), guild_target()],
+        Filter::default(),
+        options,
+        60,
+    )
+    .await;
+
+    assert!(summary.error.is_none() && !summary.cancelled);
+    assert_eq!(fake.remaining(), vec![id_at(5, 0)]);
+    assert!(events.iter().any(|e| matches!(e, Event::BackupKept { .. })));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::BackupSealed { .. })));
+    // The key stays, so the continued run can finish the backup.
+    assert!(settings.parts.join("key.age").exists());
+    let checkpoint = checkpoint_of(&events);
+    assert!(
+        checkpoint.is_finished(Snowflake(DM_CHANNEL)) && !checkpoint.is_finished(Snowflake(GUILD))
+    );
+}
+
 async fn scan_into(fake: &FakeDiscord, cache: &MessageCache, filter: &Filter) -> Vec<ScanEvent> {
     let mut events = Vec::new();
     scan::scan(
