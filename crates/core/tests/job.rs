@@ -1185,6 +1185,43 @@ async fn a_stopped_run_can_be_continued() {
     assert_eq!(fake.remaining().len(), 3);
 }
 
+/// A run stopped after its last message (e.g. during the pause after it, or
+/// while searching again from the top) still retries the ones that failed.
+#[tokio::test]
+async fn a_continued_run_retries_failed_messages_above_where_it_stopped() {
+    let messages: Vec<FakeMessage> = (0..10)
+        .map(|minute| FakeMessage::in_dm(minute, 0))
+        .collect();
+    let failing = messages[7].id;
+    let mut state = State::with_messages(messages);
+    state.delete_errors.insert(failing, (400, 0));
+    let fake = FakeDiscord::start(state).await;
+    let targets = [dm_target()];
+    let options = JobOptions {
+        max_rounds: 1,
+        ..fast()
+    };
+    let (_, first) = run_job(&fake, &targets, Filter::default(), options).await;
+    // Everything was dealt with, but the DM did not count as finished.
+    let checkpoint = checkpoint_of(
+        &first
+            .into_iter()
+            .filter(|e| !matches!(e, Event::TargetFinished { .. }))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(checkpoint.stats.failed, 1);
+    assert_eq!(fake.remaining(), [failing]);
+    fake.state.lock().unwrap().delete_errors.clear();
+
+    let options = JobOptions {
+        resume: Some(checkpoint),
+        ..fast()
+    };
+    let (summary, _) = run_job(&fake, &targets, Filter::default(), options).await;
+    assert_eq!(summary.stats.deleted, 1);
+    assert!(fake.remaining().is_empty());
+}
+
 #[tokio::test]
 async fn a_stopped_package_run_can_be_continued() {
     let messages: Vec<FakeMessage> = (0..30)
