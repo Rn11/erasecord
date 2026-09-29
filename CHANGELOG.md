@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- **Save what the others sent:** a backup can also include the images and files the others sent in the chosen
+  time range, in DMs and group chats only, never on servers (*Also save what the others sent*, CLI
+  `--backup-others`). Their messages are not touched; exports list them as `saved_from_others` with a new
+  `author` column.
+- **Calmer downloads:** backup files are downloaded 1 s apart (40 % of the pause between deletions) instead of
+  back to back, and a "too many requests" from Discord's file server is waited out and slows the run down.
+- **Emoji:** newer emoji such as 🫠 and 🩷 no longer show as empty boxes on Windows 10; the app brings Noto Color
+  Emoji along. The live statistics while counting keep emoji whole (👍🏽, 👩‍💻, flags) instead of splitting them.
+- Updating: 0.3.0 and 0.4.0 offer this version by themselves a few seconds after starting.
+
 ## 0.4.0
 
 - **Messages are searched for only once.** Counting reads them and shows statistics while it goes (messages per

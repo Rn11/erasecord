@@ -1,5 +1,6 @@
 //! A record of what a run deleted (or, in a dry run, would delete): one row
-//! per message with its text and attachment links, as CSV or JSON.
+//! per message with its text and attachment links, as CSV or JSON. Messages
+//! of others whose attachments were saved get a row too, with their author.
 
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -47,12 +48,15 @@ struct Row<'a> {
     attachments: &'a [String],
     /// Paths of the backed-up attachments, relative to the backup folder.
     saved_files: &'a [String],
+    /// Who sent it, for messages of others; empty for the user's own.
+    author: &'a str,
 }
 
 const CSV_HEADER: &str =
-    "place,place_id,channel_id,message_id,sent_at,status,content,attachments,saved_files\r\n";
+    "place,place_id,channel_id,message_id,sent_at,status,content,attachments,saved_files,author\r\n";
 
-/// Writes [`Event::Deleted`] events as they arrive; other events only supply
+/// Writes [`Event::Deleted`] and [`Event::SavedFromOthers`] events as they
+/// arrive; other events only supply
 /// the names of servers and DMs. Call [`ExportWriter::finish`] at the end.
 pub struct ExportWriter<W: Write> {
     out: W,
@@ -110,6 +114,33 @@ impl<W: Write> ExportWriter<W> {
                     content,
                     attachments,
                     saved_files: saved,
+                    author: "",
+                };
+                self.write_row(&row)?;
+                self.rows += 1;
+            }
+            Event::SavedFromOthers {
+                target_id,
+                channel_id,
+                message_id,
+                sent_at,
+                author,
+                content,
+                attachments,
+                saved,
+            } => {
+                let place = self.names.get(target_id).cloned().unwrap_or_default();
+                let row = Row {
+                    place: &place,
+                    place_id: target_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    message_id: message_id.to_string(),
+                    sent_at: sent_at.to_rfc3339(),
+                    status: "saved_from_others",
+                    content,
+                    attachments,
+                    saved_files: saved,
+                    author,
                 };
                 self.write_row(&row)?;
                 self.rows += 1;
@@ -136,6 +167,7 @@ impl<W: Write> ExportWriter<W> {
             content: &message.content,
             attachments: &attachments,
             saved_files: &[],
+            author: "",
         };
         self.write_row(&row)?;
         self.rows += 1;
@@ -157,6 +189,7 @@ impl<W: Write> ExportWriter<W> {
                     row.content,
                     &attachments,
                     &saved,
+                    row.author,
                 ];
                 let line: Vec<String> = cells.iter().map(|c| csv_cell(c)).collect();
                 write!(self.out, "{}\r\n", line.join(","))?;
@@ -243,9 +276,36 @@ mod tests {
         assert_eq!(lines[0], format!("\u{feff}{}", CSV_HEADER.trim_end()));
         assert_eq!(
             lines[1],
-            "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt,attachments/11/1_1_a.png"
+            "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt,attachments/11/1_1_a.png,"
         );
         assert!(lines[2].contains(",would_delete,'=1+1,"));
+    }
+
+    #[test]
+    fn marks_the_others_messages_with_their_author() {
+        let mut writer = ExportWriter::new(Vec::new(), ExportFormat::JsonLines).unwrap();
+        let other = Event::SavedFromOthers {
+            target_id: Snowflake(10),
+            channel_id: Snowflake(10),
+            message_id: Snowflake(3),
+            sent_at: Utc.with_ymd_and_hms(2024, 5, 1, 12, 0, 0).unwrap(),
+            author: "Friend".into(),
+            content: "look".into(),
+            attachments: vec!["https://cdn/c.jpg".into()],
+            saved: vec!["attachments/10/3_1_c.jpg".into()],
+        };
+        for event in [started(), other, deleted(1, "mine", false)] {
+            writer.observe(&event).unwrap();
+        }
+        let text = String::from_utf8(writer.finish().unwrap()).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rows[0]["status"], "saved_from_others");
+        assert_eq!(rows[0]["author"], "Friend");
+        assert_eq!(rows[0]["saved_files"][0], "attachments/10/3_1_c.jpg");
+        assert_eq!(rows[1]["author"], "");
     }
 
     #[test]

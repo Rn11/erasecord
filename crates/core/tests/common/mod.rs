@@ -95,6 +95,8 @@ pub struct State {
     pub files_base: String,
     /// Attachment links sent to the refresh endpoint.
     pub refreshed: Vec<String>,
+    /// Attachment downloads, by file name, in the order they arrived.
+    pub downloads: Vec<String>,
     /// Channels that answer 404 Unknown Channel.
     pub gone_channels: Vec<u64>,
     /// Servers whose search answers 403 Missing Access.
@@ -132,7 +134,7 @@ impl FakeDiscord {
         let state = Arc::new(Mutex::new(state));
         Mock::given(method("GET"))
             .and(path_regex(r"^/files/\d+/[^/]+$"))
-            .respond_with(FileResponder)
+            .respond_with(FileResponder(state.clone()))
             .mount(&server)
             .await;
         Mock::given(method("POST"))
@@ -269,13 +271,20 @@ fn error_json(status: u16, code: u64, message: &str) -> ResponseTemplate {
 }
 
 /// Serves "contents of <name>". Names starting with `expired-` only answer
-/// once their link was refreshed (`?fresh=1`); `missing-` never answer.
-struct FileResponder;
+/// once their link was refreshed (`?fresh=1`); `missing-` never answer;
+/// `busy-` first answer 429 Too Many Requests.
+struct FileResponder(Arc<Mutex<State>>);
 
 impl Respond for FileResponder {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let name = request.url.path().rsplit('/').next().unwrap().to_owned();
         let fresh = request.url.query().is_some_and(|q| q.contains("fresh=1"));
+        let mut state = self.0.lock().unwrap();
+        let first = !state.downloads.contains(&name);
+        state.downloads.push(name.clone());
+        if name.starts_with("busy-") && first {
+            return ResponseTemplate::new(429).insert_header("retry-after", "0.05");
+        }
         if name.starts_with("missing-") || (name.starts_with("expired-") && !fresh) {
             return ResponseTemplate::new(404);
         }

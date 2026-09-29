@@ -176,7 +176,13 @@ function fakeStats(n: number, complete: boolean): ScanStats {
     months,
     week,
     top_words: WORDS.map((w, i) => [w, Math.round(total / (i + 3))] as [string, number]),
-    top_emoji: [["😂", Math.round(total / 9)], ["👍", Math.round(total / 14)], ["🎉", Math.round(total / 30)]],
+    top_emoji: [
+      ["😂", Math.round(total / 9)],
+      ["👍🏽", Math.round(total / 14)],
+      ["🫠", Math.round(total / 20)],
+      ["🩷", Math.round(total / 25)],
+      ["🎉", Math.round(total / 30)],
+    ],
     busiest_day: months.length ? [`${months[0][0]}-14`, Math.round(total / 40) + 3] : null,
     longest: 1834,
   };
@@ -239,6 +245,7 @@ async function simulate(
   overwrite: boolean,
   resume: UnfinishedRun | null = null,
   encrypted = false,
+  others = false,
 ) {
   const send = (event: JobEvent) => emit("job-event", event);
   const total: Stats = { deleted: 0, skipped: 0, failed: 0 };
@@ -295,6 +302,25 @@ async function simulate(
       if (!dryRun && i % 50 === 49) {
         await send({ type: "notice", notice: { kind: "rate_limited", wait_ms: 1500, global: false } });
         await sleep(1500);
+      }
+    }
+    if (others && !cancelled && target.kind !== "guild") {
+      await send({ type: "activity", activity: { kind: "searching_others", target_id: target.id, page: 1 } });
+      await sleep(400);
+      for (let i = 0; i < 3; i++) {
+        stats.saved_from_others = (stats.saved_from_others ?? 0) + 1;
+        await send({
+          type: "saved_from_others",
+          target_id: target.id,
+          channel_id: target.id,
+          message_id: String(800_000 + i),
+          sent_at: new Date(Date.now() - (i + 3) * 86_400_000).toISOString(),
+          author: "Alex",
+          content: "look at this",
+          attachments: ["https://cdn.discordapp.com/attachments/1/2/photo.jpg"],
+          saved: Array.from({ length: i + 1 }, (_, n) => `attachments/${target.id}/${800_000 + i}_${n + 1}_photo.jpg`),
+        });
+        await sleep(150);
       }
     }
     total.deleted += stats.deleted;
@@ -464,6 +490,7 @@ export function installMockBackend() {
             args.options.overwrite !== null,
             null,
             !!args.options.backup_dir && !!args.backupPassphrase,
+            !!args.options.backup_dir && !!args.options.backup_others,
           );
           return exportPath;
         case "pause_job":

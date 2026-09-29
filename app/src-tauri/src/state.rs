@@ -149,7 +149,10 @@ impl AppState {
     }
 
     pub fn record(&self, event: &Event) {
-        if matches!(event, Event::TargetStarted { .. } | Event::Deleted { .. }) {
+        if matches!(
+            event,
+            Event::TargetStarted { .. } | Event::Deleted { .. } | Event::SavedFromOthers { .. }
+        ) {
             self.last_run.lock().unwrap().push(event.clone());
         }
     }

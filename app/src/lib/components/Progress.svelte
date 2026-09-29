@@ -158,6 +158,9 @@
       </div>
     </div>
 
+    {#if run.othersSaved > 0}
+      <p class="callout small info">{t("progress.savedFromOthers", { count: run.othersSaved })}</p>
+    {/if}
     {#if run.backup && "archive" in run.backup}
       <p class="callout small info backup">
         <span>{t("progress.backupSealed", { files: num(run.backup.files), messages: num(run.backup.messages) })}</span>

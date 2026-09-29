@@ -285,6 +285,10 @@ struct DeleteOptions {
     /// plain files and messages-<time>.json instead. With --dry-run this only backs up.
     #[arg(long, value_name = "DIR")]
     backup: Option<PathBuf>,
+    /// With --backup: in DMs and group DMs, also save the attachments the others sent in the
+    /// chosen time range (their messages are not touched). Never on servers.
+    #[arg(long, requires = "backup")]
+    backup_others: bool,
     /// Write the backup and --export without encryption. Not recommended: they contain
     /// your messages.
     #[arg(long)]
@@ -661,6 +665,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 dry_run: options.dry_run,
                 overwrite: options.overwrite.clone(),
                 backup_dir: options.backup.clone(),
+                backup_others: options.backup_others,
                 ..Default::default()
             };
             if !options.dry_run && !options.yes {
@@ -1309,6 +1314,26 @@ impl Progress {
                 self.stats.failed += 1;
                 self.line(format!("  failed to delete {message_id}: {error}"));
             }
+            Event::SavedFromOthers {
+                sent_at,
+                author,
+                saved,
+                ..
+            } => {
+                self.stats.saved_from_others += 1;
+                if self.verbose {
+                    let sent = sent_at.with_timezone(&Local).format("%Y-%m-%d %H:%M");
+                    self.line(format!(
+                        "  saved {} file(s) from {author}, {sent}",
+                        saved.len()
+                    ));
+                }
+            }
+            Event::NotSavedFromOthers {
+                message_id, error, ..
+            } => self.line(format!(
+                "  could not save the files of {message_id}: {error}"
+            )),
             Event::TargetFailed { error, .. } => self.line(format!("  could not search: {error}")),
             Event::ChannelUnreachable {
                 channel_id,
@@ -1321,10 +1346,20 @@ impl Progress {
                     "  skipped {messages} message(s) in channel {channel_id}: {error}"
                 ));
             }
-            Event::TargetFinished { stats, .. } => self.line(format!(
-                "  {} {}, {} skipped, {} failed",
-                stats.deleted, self.deleted_label, stats.skipped, stats.failed
-            )),
+            Event::TargetFinished { stats, .. } => {
+                let others = if stats.saved_from_others > 0 {
+                    format!(
+                        "; files of {} message(s) of others saved",
+                        stats.saved_from_others
+                    )
+                } else {
+                    String::new()
+                };
+                self.line(format!(
+                    "  {} {}, {} skipped, {} failed{others}",
+                    stats.deleted, self.deleted_label, stats.skipped, stats.failed
+                ))
+            }
             Event::Notice { notice } => self.line(format!("  {}", describe_notice(notice))),
             Event::Activity { activity } => match activity {
                 Activity::Break { ms } => self.line(format!(

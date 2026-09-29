@@ -594,6 +594,15 @@
             <button type="button" class="link small" onclick={() => chooseBackupFolder()}>{t("setup.backupChange")}</button>
           </span>
           <span class="small muted">{encrypt ? t("setup.backupHintEncrypted") : t("setup.backupHint")}</span>
+          <label class="choice">
+            <input type="checkbox" bind:checked={options.backup_others} />
+            <span>{t("setup.backupOthers")}</span>
+          </label>
+          {#if options.backup_others}
+            <span class="small muted">
+              {selectedDms > 0 ? t("setup.backupOthersHint") : t("setup.backupOthersNoDms")}
+            </span>
+          {/if}
         </div>
       {/if}
       <label class="choice">

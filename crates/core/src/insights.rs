@@ -275,7 +275,8 @@ static CUSTOM_EMOJI: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<(a?):(\w{1,32}):(\d{15,21})>").expect("valid pattern"));
 static MENTION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"<@!?(\d{15,21})>").expect("valid pattern"));
-static EMOJI: LazyLock<Regex> = LazyLock::new(|| {
+/// An emoji with its skin tone and ZWJ parts, or a flag.
+pub(crate) static EMOJI: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)
           [\x{1F1E6}-\x{1F1FF}]{2}
@@ -284,6 +285,15 @@ static EMOJI: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid pattern")
 });
+
+/// The emoji in `text`, whole: 👍🏽 and 👩‍💻 stay one emoji each.
+pub(crate) fn emoji_in(text: &str) -> impl Iterator<Item = &str> {
+    EMOJI
+        .find_iter(text)
+        .map(|m| m.as_str())
+        // Keycap digits and the like are not what people mean.
+        .filter(|e| e.chars().next().is_some_and(|c| !c.is_ascii()))
+}
 
 impl Index {
     /// Goes through every message once. `tz` is the user's time zone
@@ -822,11 +832,8 @@ impl Index {
                 }
             }
             if !text.is_ascii() {
-                for m in EMOJI.find_iter(text) {
-                    // Keycap digits and the like are not what people mean.
-                    if m.as_str().chars().next().is_some_and(|c| !c.is_ascii()) {
-                        *counts.emoji.entry(m.as_str().to_owned()).or_default() += 1;
-                    }
+                for emoji in emoji_in(text) {
+                    *counts.emoji.entry(emoji.to_owned()).or_default() += 1;
                 }
             }
             for token in text.split_whitespace() {
