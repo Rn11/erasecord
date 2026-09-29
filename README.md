@@ -99,7 +99,9 @@ Your token gives full access to your account: never share it. Changing your Disc
    up), and **Export the messages to a file** writes every deleted message into a new file while deleting.
    Both are encrypted with one passphrase: twelve generated words that you confirm by typing three of them,
    your own, or a file. Keep it: without it the backup cannot be opened. **Open a backup…** decrypts and unpacks
-   it again.
+   it again. With **Also save what the others sent**, the backup also gets the images and files the others sent
+   in the chosen time range, in the selected DMs and group chats only (never on servers); their messages are
+   not touched.
 3. Click **Count messages**. EraseCord counts first, then reads the messages and shows statistics about them
    as it goes; **Stop reading** keeps what was read. **Export these messages…** saves them to a file before
    anything is deleted.
@@ -178,6 +180,9 @@ erasecord inspect-package package.zip             # its structure only, safe to 
   `DIR/erasecord-backup-<time>.tar.age` with the list of messages. A message whose files cannot be downloaded is
   kept. While the run is going the backup is written as encrypted parts (`….parts/`); a message is deleted only
   once the part with its files is safely on disk, and the parts are combined at the end.
+- `--backup-others` (with `--backup`) also saves the attachments the others sent in the chosen time range, in
+  DMs and group DMs only (never on servers). Their messages are not touched; the list marks them
+  `saved_from_others` with their author.
 - Backups and exports are encrypted unless you pass `--no-encrypt`. The passphrase is asked for (press Enter for
   twelve generated words, confirmed by typing three of them) or read from the first line of
   `--passphrase-file FILE`. `open-backup PATH --to DIR` decrypts an archive, a `.parts` folder or an export;
@@ -228,7 +233,9 @@ s](https://github.com/victornpb/undiscord/discussions/414) to avoid that. EraseC
 - strictly one request at a time;
 - 2.5 s between deletions and 3 s between searches, each varying randomly by ±25 %;
 - a longer break (about 30 s) after every 100 deletions;
-- whenever Discord rate limits it, it waits as long as Discord asks and makes every later pause 25 % longer
+- attachments for a backup are downloaded one at a time, 1 s apart (40 % of the pause between deletions);
+- whenever Discord (or its file server) rate limits it, it waits as long as Discord asks and makes every later
+  pause 25 % longer
   (up to four times the setting) for the rest of the run;
 - messages are searched for once, not again for the dry run and the clean-up.
 

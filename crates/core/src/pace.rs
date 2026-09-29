@@ -8,6 +8,9 @@
 //! - whenever Discord rate limits it, the pauses get longer for the rest of
 //!   the run (up to [`MAX_SLOWDOWN`] times the configured ones).
 //!
+//! - attachments are downloaded one at a time, with a pause of
+//!   [`DOWNLOAD_SHARE`] % of the one between deletions before each;
+//!
 //! All of it scales with the configured pauses, so pauses of 0 (as in the
 //! tests) mean no waiting at all.
 
@@ -26,6 +29,11 @@ const BREAK_PAUSES: u64 = 12;
 const SLOWDOWN_STEP: u64 = 25;
 /// The pauses never get longer than this many times the configured ones.
 const MAX_SLOWDOWN: u64 = 4;
+/// The pause before downloading an attachment, in percent of the one
+/// between deletions (1 s with the default 2.5 s). Discord's file servers
+/// are not the API and have no published limit, but a backup should not
+/// fetch hundreds of files as fast as it can either.
+pub const DOWNLOAD_SHARE: u64 = 40;
 
 #[derive(Debug)]
 pub struct Pace {
@@ -62,6 +70,11 @@ impl Pace {
     /// The pause before a search request.
     pub fn before_search(&self) -> Duration {
         jitter(self.scaled(self.search_ms))
+    }
+
+    /// The pause before downloading an attachment.
+    pub fn before_download(&self) -> Duration {
+        jitter(self.scaled(self.delete_ms) * DOWNLOAD_SHARE / 100)
     }
 
     /// Discord said to slow down: longer pauses from now on.
@@ -104,6 +117,18 @@ mod tests {
         let pauses: Vec<u128> = (0..50).map(|_| pace.before_search().as_millis()).collect();
         assert!(pauses.iter().all(|&ms| (2250..=3750).contains(&ms)));
         assert!(pauses.iter().any(|&ms| ms != pauses[0]));
+    }
+
+    #[test]
+    fn downloads_wait_less_than_deletions() {
+        let pace = Pace::new(2500, 3000);
+        let pauses: Vec<u128> = (0..50)
+            .map(|_| pace.before_download().as_millis())
+            .collect();
+        assert!(pauses.iter().all(|&ms| (750..=1250).contains(&ms)));
+        pace.slow_down();
+        assert!(pace.before_download() >= Duration::from_millis(937));
+        assert_eq!(Pace::new(0, 0).before_download(), Duration::ZERO);
     }
 
     #[test]

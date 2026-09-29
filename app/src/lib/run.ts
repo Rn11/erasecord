@@ -47,6 +47,8 @@ export interface RunState {
   waiting: Waiting | null;
   /** Where the messages are exported to while the run goes. */
   exportPath: string | null;
+  /** Messages of others whose files were saved. */
+  othersSaved: number;
   /** What became of an encrypted backup. */
   backup: { archive: string; files: number; messages: number } | { folder: string; reason: string } | null;
 }
@@ -78,6 +80,7 @@ export function newRun(targets: Target[], expected: number, dryRun: boolean, res
     prior,
     growExpected: !!resume,
     backup: null,
+    othersSaved: 0,
     activity: null,
     waiting: null,
     exportPath: null,
@@ -141,6 +144,17 @@ export function applyEvent(run: RunState, event: JobEvent) {
       if (progress) progress.stats.failed++;
       run.totals.failed++;
       log(run, "error", t("log.failed", { name, error: event.error }));
+      break;
+    case "saved_from_others":
+      run.othersSaved++;
+      log(
+        run,
+        "ok",
+        t("log.savedFromOthers", { count: event.saved.length, author: event.author, name, date: formatDate(event.sent_at) }),
+      );
+      break;
+    case "not_saved_from_others":
+      log(run, "warn", t("log.notSavedFromOthers", { name, error: event.error }));
       break;
     case "channel_unreachable":
       if (progress) progress.stats.skipped += event.messages;

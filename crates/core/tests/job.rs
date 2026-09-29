@@ -839,6 +839,180 @@ async fn backs_up_attachments_before_deleting() {
 }
 
 #[tokio::test]
+async fn downloads_wait_between_files_and_when_asked_to() {
+    let messages: Vec<FakeMessage> = (0..3)
+        .map(|minute| FakeMessage {
+            files: vec![format!("busy-{minute}.png"), format!("b{minute}.png")],
+            ..FakeMessage::in_dm(minute, 0)
+        })
+        .collect();
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let dir = tempfile::tempdir().unwrap();
+    // A dry run: no pauses between deletions, only between downloads
+    // (40 % of 100 ms, give or take a quarter).
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        dry_run: true,
+        delete_delay_ms: 100,
+        ..fast()
+    };
+
+    let started = std::time::Instant::now();
+    let (summary, _) = run_job(&fake, &[dm_target()], Filter::default(), options).await;
+
+    assert_eq!((summary.stats.deleted, summary.stats.failed), (3, 0));
+    assert_eq!(files_below(dir.path()).len(), 6);
+    // Six files, three of them asked twice: eight pauses of at least 30 ms,
+    // plus the waits the file server asked for.
+    assert_eq!(fake.state.lock().unwrap().downloads.len(), 9);
+    assert!(started.elapsed() >= Duration::from_millis(8 * 30 + 3 * 50));
+}
+
+#[tokio::test]
+async fn saves_what_others_sent_in_a_dm_without_touching_it() {
+    let mine = FakeMessage {
+        files: vec!["mine.png".into()],
+        ..FakeMessage::in_dm(10, 0)
+    };
+    let theirs = FakeMessage {
+        author_id: OTHER,
+        files: vec!["theirs.jpg".into(), "clip.mp4".into()],
+        ..FakeMessage::in_dm(20, 0)
+    };
+    let their_text = FakeMessage {
+        author_id: OTHER,
+        ..FakeMessage::in_dm(30, 0)
+    };
+    let too_old = FakeMessage {
+        author_id: OTHER,
+        files: vec!["old.png".into()],
+        ..FakeMessage::in_dm(1, 0)
+    };
+    let fake = FakeDiscord::start(State::with_messages(vec![
+        mine.clone(),
+        theirs.clone(),
+        their_text.clone(),
+        too_old.clone(),
+    ]))
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        backup_others: true,
+        ..fast()
+    };
+    let filter = Filter {
+        after: Some(at(5)),
+        ..Filter::default()
+    };
+
+    let (summary, events) = run_job(&fake, &[dm_target()], filter, options).await;
+
+    assert_eq!(summary.stats.deleted, 1);
+    assert_eq!(summary.stats.saved_from_others, 1);
+    assert_eq!(fake.remaining(), {
+        let mut ids = vec![theirs.id, their_text.id, too_old.id];
+        ids.sort_unstable();
+        ids
+    });
+    let read = |relative: &str| std::fs::read_to_string(dir.path().join(relative)).unwrap();
+    let photo = format!("attachments/{DM_CHANNEL}/{}_1_theirs.jpg", theirs.id);
+    let clip = format!("attachments/{DM_CHANNEL}/{}_2_clip.mp4", theirs.id);
+    assert_eq!(read(&photo), "contents of theirs.jpg");
+    assert_eq!(read(&clip), "contents of clip.mp4");
+    assert_eq!(files_below(dir.path()).len(), 3);
+    let saved: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::SavedFromOthers {
+                message_id,
+                author,
+                saved,
+                ..
+            } => Some((message_id.0, author.clone(), saved.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        saved,
+        [(theirs.id, "someone".to_owned(), vec![photo, clip])]
+    );
+}
+
+#[tokio::test]
+async fn never_saves_what_others_sent_on_a_server() {
+    let theirs = FakeMessage {
+        files: vec!["theirs.jpg".into()],
+        ..FakeMessage::in_guild(20, 0, OTHER)
+    };
+    let mine = FakeMessage {
+        files: vec!["mine.png".into()],
+        ..FakeMessage::in_guild(10, 0, ME)
+    };
+    let fake = FakeDiscord::start(State::with_messages(vec![theirs, mine])).await;
+    let dir = tempfile::tempdir().unwrap();
+    let options = JobOptions {
+        backup_dir: Some(dir.path().to_owned()),
+        backup_others: true,
+        ..fast()
+    };
+
+    let (summary, events) = run_job(&fake, &[guild_target()], Filter::default(), options).await;
+
+    assert_eq!(
+        (summary.stats.deleted, summary.stats.saved_from_others),
+        (1, 0)
+    );
+    assert_eq!(files_below(dir.path()).len(), 1);
+    assert_eq!(fake.state.lock().unwrap().downloads, ["mine.png"]);
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, Event::SavedFromOthers { .. })));
+}
+
+#[tokio::test]
+async fn others_files_go_into_the_encrypted_archive_too() {
+    let mut messages = photos(3);
+    messages.push(FakeMessage {
+        author_id: OTHER,
+        files: vec!["gift.png".into()],
+        ..FakeMessage::in_dm(10, 0)
+    });
+    let fake = FakeDiscord::start(State::with_messages(messages)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = encrypted_options(dir.path(), "pass");
+    options.backup_others = true;
+
+    let (summary, events) =
+        run_job_within(&fake, &[dm_target()], Filter::default(), options, 120).await;
+
+    assert_eq!(
+        (summary.stats.deleted, summary.stats.saved_from_others),
+        (3, 1)
+    );
+    let archive = events
+        .iter()
+        .find_map(|e| match e {
+            Event::BackupSealed { archive, files, .. } => {
+                assert_eq!(*files, 4);
+                Some(archive.clone())
+            }
+            _ => None,
+        })
+        .expect("the backup was sealed");
+    let out = tempfile::tempdir().unwrap();
+    vault::open(&archive, &vault::secret("pass"), out.path()).unwrap();
+    let list: Vec<serde_json::Value> =
+        serde_json::from_slice(&std::fs::read(out.path().join("messages.json")).unwrap()).unwrap();
+    let others: Vec<_> = list
+        .iter()
+        .filter(|row| row["status"] == "saved_from_others")
+        .collect();
+    assert_eq!(others.len(), 1);
+    assert_eq!(others[0]["author"], "someone");
+}
+
+#[tokio::test]
 async fn keeps_messages_whose_attachments_cannot_be_saved() {
     let gone = FakeMessage {
         files: vec!["missing-video.mp4".into()],

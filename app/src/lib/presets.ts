@@ -31,7 +31,14 @@ export const defaultSettings = (): Settings => ({
   skipPinned: true,
   // Well below Discord's limits; the backend adds random variation,
   // breaks, and slows down further after rate limits.
-  options: { delete_delay_ms: 2500, search_delay_ms: 3000, max_rounds: 3, overwrite: null, backup_dir: null },
+  options: {
+    delete_delay_ms: 2500,
+    search_delay_ms: 3000,
+    max_rounds: 3,
+    overwrite: null,
+    backup_dir: null,
+    backup_others: false,
+  },
 });
 
 /** Settings saved with an old default get the new, calmer one. */
@@ -92,6 +99,7 @@ function parseSettings(value: unknown): Settings {
       max_rounds: pick(o.max_rounds, isCount, d.options.max_rounds),
       overwrite: pick(o.overwrite, (v) => v === null || isString(v), null),
       backup_dir: pick(o.backup_dir, (v) => v === null || isString(v), null),
+      backup_others: pick(o.backup_others, (v) => typeof v === "boolean", false),
     },
   };
 }

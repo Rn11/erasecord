@@ -89,6 +89,8 @@ export interface JobOptions {
   backup_dir: string | null;
   /** Set by the backend for an encrypted backup; the app sends null. */
   backup_encryption?: null;
+  /** With a backup: also save what the others sent, in DMs and group chats only. */
+  backup_others?: boolean;
 }
 
 /** A passphrase as typed, or the file it is in. */
@@ -108,6 +110,8 @@ export interface Stats {
   deleted: number;
   skipped: number;
   failed: number;
+  /** Messages of others whose files were saved. */
+  saved_from_others?: number;
 }
 
 export interface Summary {
@@ -152,6 +156,7 @@ export type Activity =
   | { kind: "using_found"; target_id: Snowflake; messages: number }
   | { kind: "deleting"; target_id: Snowflake }
   | { kind: "backing_up"; target_id: Snowflake }
+  | { kind: "searching_others"; target_id: Snowflake; page: number }
   | { kind: "checking_channel"; target_id: Snowflake }
   | { kind: "break"; ms: number }
   | { kind: "sealing_backup" };
@@ -207,6 +212,18 @@ export type JobEvent =
     }
   | { type: "skipped"; target_id: Snowflake; message_id: Snowflake; reason: SkipReason }
   | { type: "failed"; target_id: Snowflake; message_id: Snowflake; error: string }
+  | {
+      type: "saved_from_others";
+      target_id: Snowflake;
+      channel_id: Snowflake;
+      message_id: Snowflake;
+      sent_at: string;
+      author: string;
+      content: string;
+      attachments: string[];
+      saved: string[];
+    }
+  | { type: "not_saved_from_others"; target_id: Snowflake; message_id: Snowflake; error: string }
   | { type: "target_failed"; target_id: Snowflake; error: string }
   | { type: "channel_unreachable"; target_id: Snowflake; channel_id: Snowflake; messages: number; error: string }
   | { type: "target_finished"; target_id: Snowflake; stats: Stats; complete: boolean }

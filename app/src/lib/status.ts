@@ -25,6 +25,8 @@ export function activityText(activity: Activity, placeName: (id: string) => stri
       return t("status.deleting", { place: placeName(activity.target_id) });
     case "backing_up":
       return t("status.backingUp", { place: placeName(activity.target_id) });
+    case "searching_others":
+      return t("status.searchingOthers", { place: placeName(activity.target_id), page: num(activity.page) });
     case "checking_channel":
       return t("status.checkingChannel", { place: placeName(activity.target_id) });
     case "break":

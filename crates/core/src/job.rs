@@ -17,7 +17,7 @@ use crate::client::{Client, Notice};
 use crate::delete::{self, Outcome, SkipReason};
 use crate::error::{Error, Result};
 pub use crate::filter::Filter;
-use crate::filter::Matcher;
+use crate::filter::{Has, Matcher};
 use crate::models::Message;
 use crate::pace::Pace;
 use crate::package::Package;
@@ -25,7 +25,7 @@ use crate::resume::Checkpoint;
 use crate::scan::MessageCache;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
-use crate::targets::Target;
+use crate::targets::{Target, TargetKind};
 use crate::vault::{EncryptedBackup, EncryptedBackupSettings, KeySlot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +54,10 @@ pub struct JobOptions {
     /// The keys for finishing the encrypted backup. Never saved.
     #[serde(skip)]
     pub backup_keys: KeySlot,
+    /// With a backup: also save the attachments the others sent in the
+    /// chosen time range, in DMs and group DMs only (never on a server).
+    /// Their messages are not touched.
+    pub backup_others: bool,
     /// Continue an earlier run: skip what it finished and dealt with.
     pub resume: Option<Checkpoint>,
 }
@@ -70,6 +74,7 @@ impl Default for JobOptions {
             backup_dir: None,
             backup_encryption: None,
             backup_keys: KeySlot::default(),
+            backup_others: false,
             resume: None,
         }
     }
@@ -81,6 +86,9 @@ pub struct Stats {
     pub deleted: u64,
     pub skipped: u64,
     pub failed: u64,
+    /// Messages of others whose attachments were saved.
+    #[serde(default)]
+    pub saved_from_others: u64,
 }
 
 impl Stats {
@@ -88,6 +96,7 @@ impl Stats {
         self.deleted += other.deleted;
         self.skipped += other.skipped;
         self.failed += other.failed;
+        self.saved_from_others += other.saved_from_others;
     }
 }
 
@@ -139,6 +148,24 @@ pub enum Event {
         target_id: Snowflake,
         message_id: Snowflake,
         reason: SkipReason,
+    },
+    /// The attachments of someone else's message were saved (see
+    /// [`JobOptions::backup_others`]); the message itself stays.
+    SavedFromOthers {
+        target_id: Snowflake,
+        channel_id: Snowflake,
+        message_id: Snowflake,
+        sent_at: DateTime<Utc>,
+        author: String,
+        content: String,
+        attachments: Vec<String>,
+        saved: Vec<String>,
+    },
+    /// Someone else's attachments could not be saved.
+    NotSavedFromOthers {
+        target_id: Snowflake,
+        message_id: Snowflake,
+        error: String,
     },
     Failed {
         target_id: Snowflake,
@@ -216,6 +243,11 @@ pub enum Activity {
     },
     BackingUp {
         target_id: Snowflake,
+    },
+    /// Looking for attachments the others sent, page by page.
+    SearchingOthers {
+        target_id: Snowflake,
+        page: u32,
     },
     CheckingChannel {
         target_id: Snowflake,
@@ -478,7 +510,8 @@ async fn run_from(
             return summary;
         }
     };
-    let vault = match options
+    let pace = Arc::new(Pace::new(options.delete_delay_ms, options.search_delay_ms));
+    let mut vault = match options
         .backup_encryption
         .as_ref()
         .map(|settings| EncryptedBackup::open(settings, options.backup_keys.0.clone()))
@@ -500,7 +533,7 @@ async fn run_from(
     } else {
         options.backup_dir.as_deref()
     };
-    let backup = match plain_dir.map(Backup::new).transpose() {
+    let mut backup = match plain_dir.map(Backup::new).transpose() {
         Ok(backup) => backup,
         Err(err) => {
             let summary = Summary {
@@ -512,7 +545,12 @@ async fn run_from(
             return summary;
         }
     };
-    let pace = Arc::new(Pace::new(options.delete_delay_ms, options.search_delay_ms));
+    if let Some(vault) = &mut vault {
+        vault.set_pace(pace.clone());
+    }
+    if let Some(backup) = &mut backup {
+        backup.set_pace(pace.clone());
+    }
     let notices = events.clone();
     let slow = pace.clone();
     client.set_notice_sink(Some(Arc::new(move |notice| {
@@ -561,6 +599,9 @@ async fn run_from(
             result = job.flush(target, &mut stats).await;
         } else {
             job.abandon_pending();
+        }
+        if result.is_ok() && options.backup_others {
+            result = job.save_from_others(target, &mut stats).await;
         }
         total.add(stats);
         let complete = result.is_ok();
@@ -826,6 +867,112 @@ impl Job<'_> {
         Ok(())
     }
 
+    /// Saves the attachments the others sent in a DM or group DM in the
+    /// chosen time range, without touching their messages. Never on a
+    /// server: there, what others posted is not the user's to take.
+    async fn save_from_others(&self, target: &Target, stats: &mut Stats) -> Result<()> {
+        if target.kind == TargetKind::Guild || (self.backup.is_none() && self.vault.is_none()) {
+            return Ok(());
+        }
+        let query = SearchQuery {
+            min_id: self.query.min_id,
+            max_id: self.query.max_id,
+            has: vec![Has::File],
+            ..SearchQuery::default()
+        };
+        let mut cursor = query.max_id;
+        let mut seen = HashSet::new();
+        let mut page = 0;
+        loop {
+            self.control.sleep_for(self.pace.before_search()).await?;
+            self.control.checkpoint().await?;
+            page += 1;
+            self.activity(Activity::SearchingOthers {
+                target_id: target.id,
+                page,
+            });
+            let found =
+                crate::scan::search_page(self.client, None, target, &query, cursor, self.control)
+                    .await;
+            let (hits, next) = match found {
+                Ok((hits, next, _)) => (hits, next),
+                Err(err @ (Error::Unauthorized | Error::Cancelled)) => return Err(err),
+                Err(err) => {
+                    self.commit_others();
+                    return Err(Error::Incomplete(format!(
+                        "could not look for the others' attachments: {err}"
+                    )));
+                }
+            };
+            for message in hits {
+                if message.author.id != self.me
+                    && message.channel_id == target.id
+                    && !message.attachments.is_empty()
+                    && self.filter.contains(message.id)
+                    && seen.insert(message.id)
+                {
+                    self.save_other(target, message, stats).await?;
+                }
+            }
+            match next {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        self.commit_others();
+        Ok(())
+    }
+
+    async fn save_other(&self, target: &Target, message: Message, stats: &mut Stats) -> Result<()> {
+        self.control.checkpoint().await?;
+        self.activity(Activity::BackingUp {
+            target_id: target.id,
+        });
+        let result = match (self.vault, &self.backup) {
+            (Some(vault), _) => self.control.guard(vault.add(self.client, &message)).await?,
+            (None, Some(backup)) => {
+                self.control
+                    .guard(backup.save(self.client, &message))
+                    .await?
+            }
+            (None, None) => return Ok(()),
+        };
+        match result {
+            Ok(saved) => {
+                stats.saved_from_others += 1;
+                self.emit(Event::SavedFromOthers {
+                    target_id: target.id,
+                    channel_id: message.channel_id,
+                    message_id: message.id,
+                    sent_at: message.id.created_at(),
+                    author: message.author.display_name().to_owned(),
+                    content: message.content.clone(),
+                    attachments: attachment_urls(&message),
+                    saved,
+                });
+                if self.vault.is_some_and(EncryptedBackup::part_is_full) {
+                    self.commit_others();
+                }
+            }
+            Err(error) => self.emit(Event::NotSavedFromOthers {
+                target_id: target.id,
+                message_id: message.id,
+                error,
+            }),
+        }
+        Ok(())
+    }
+
+    /// Seals the open part of the encrypted backup. Nothing waits for it,
+    /// so a failure is only logged; the run's end reports on the backup.
+    fn commit_others(&self) {
+        if let Some(vault) = self.vault {
+            if let Err(err) = vault.commit() {
+                tracing::warn!(%err, "could not seal the backup part");
+            }
+        }
+    }
+
     /// Deletes the matching messages of a data package, channel by channel.
     /// Each channel is looked up first, so channels that are gone or out of
     /// reach cost one request instead of one per message.
@@ -1071,11 +1218,7 @@ impl Job<'_> {
             sent_at: message.id.created_at(),
             preview: preview_text(message),
             content: message.content.clone(),
-            attachments: message
-                .attachments
-                .iter()
-                .filter_map(|a| a["url"].as_str().map(str::to_owned))
-                .collect(),
+            attachments: attachment_urls(message),
             saved,
             dry_run,
         });
@@ -1088,6 +1231,14 @@ impl Job<'_> {
             reason,
         });
     }
+}
+
+fn attachment_urls(message: &Message) -> Vec<String> {
+    message
+        .attachments
+        .iter()
+        .filter_map(|a| a["url"].as_str().map(str::to_owned))
+        .collect()
 }
 
 /// 8 to 24 random lowercase letters.

@@ -3,9 +3,12 @@
 //!
 //! Files go to `<folder>/attachments/<channel ID>/<message ID>_<n>_<name>`.
 //! Only Discord's own file servers are contacted (and, for testing against
-//! a fake API, that API's own server), and without the token.
+//! a fake API, that API's own server), and without the token. Files are
+//! fetched one at a time with a pause before each (see [`crate::pace`]).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{StatusCode, Url};
@@ -13,6 +16,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::client::Client;
 use crate::models::Message;
+use crate::pace::Pace;
 
 /// Hosts that serve Discord attachments. Anything else is never fetched.
 const ATTACHMENT_HOSTS: [&str; 3] = [
@@ -21,11 +25,17 @@ const ATTACHMENT_HOSTS: [&str; 3] = [
     "cdn.discord.com",
 ];
 const MAX_ATTEMPTS: u32 = 3;
+/// The longest a "too many requests" answer is waited out.
+const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(60);
 
 pub struct Backup {
     folder: PathBuf,
     /// A plain client: the token must never reach the file servers.
     http: reqwest::Client,
+    /// How long to wait between downloads; none without it.
+    pace: Option<Arc<Pace>>,
+    /// Something was downloaded already, so the next one waits first.
+    fetched: AtomicBool,
 }
 
 impl Backup {
@@ -45,7 +55,14 @@ impl Backup {
         Ok(Backup {
             folder: folder.to_owned(),
             http,
+            pace: None,
+            fetched: AtomicBool::new(false),
         })
+    }
+
+    /// Waits between downloads, and longer after being told to slow down.
+    pub(crate) fn set_pace(&mut self, pace: Arc<Pace>) {
+        self.pace = Some(pace);
     }
 
     pub fn folder(&self) -> &Path {
@@ -92,6 +109,11 @@ impl Backup {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            if let Some(pace) = &self.pace {
+                if self.fetched.swap(true, Ordering::Relaxed) {
+                    tokio::time::sleep(pace.before_download()).await;
+                }
+            }
             match self.fetch(&url, &mut dest).await {
                 Ok(()) => return Ok(()),
                 // Expired link (typical for data packages): ask for a fresh one.
@@ -110,6 +132,12 @@ impl Backup {
                     check_host(&fresh, api)?;
                     url = fresh;
                 }
+                Err(Fetch::TooManyRequests(wait)) if attempt < MAX_ATTEMPTS => {
+                    if let Some(pace) = &self.pace {
+                        pace.slow_down();
+                    }
+                    tokio::time::sleep(wait).await;
+                }
                 Err(Fetch::Status(status))
                     if status.is_server_error() && attempt < MAX_ATTEMPTS =>
                 {
@@ -127,6 +155,18 @@ impl Backup {
     /// that is then renamed, so a half-written file never looks complete.
     async fn fetch(&self, url: &str, dest: &mut Dest<'_>) -> Result<(), Fetch> {
         let mut response = self.http.get(url).send().await.map_err(Fetch::Network)?;
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let wait = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .filter(|secs| secs.is_finite() && *secs >= 0.0)
+                .map_or(Duration::from_secs(5), |secs| {
+                    Duration::from_secs_f64(secs.min(MAX_RATE_LIMIT_WAIT.as_secs_f64()))
+                });
+            return Err(Fetch::TooManyRequests(wait));
+        }
         if !response.status().is_success() {
             return Err(Fetch::Status(response.status()));
         }
@@ -171,6 +211,8 @@ enum Dest<'a> {
 
 enum Fetch {
     Status(StatusCode),
+    /// How long the file server asked to wait.
+    TooManyRequests(Duration),
     Network(reqwest::Error),
     Io(std::io::Error),
 }
@@ -179,6 +221,7 @@ impl std::fmt::Display for Fetch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Fetch::Status(status) => write!(f, "the file server answered {status}"),
+            Fetch::TooManyRequests(_) => write!(f, "the file server kept asking to slow down"),
             Fetch::Network(err) => write!(f, "network error: {err}"),
             Fetch::Io(err) => write!(f, "{err}"),
         }

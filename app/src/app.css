@@ -36,6 +36,15 @@
   -webkit-font-smoothing: antialiased;
 }
 
+/* Windows 10 no longer gets new emoji, so newer ones (🫠, 🩷, …) were empty
+   boxes. On Windows every emoji comes from the bundled Noto Color Emoji
+   (see emoji.css), so they all look alike. macOS and Linux keep their own,
+   which stay up to date. */
+:root.windows {
+  font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif,
+    "EraseCord Emoji";
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #141518;

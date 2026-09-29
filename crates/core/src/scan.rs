@@ -327,8 +327,10 @@ impl StatsBuilder {
                 continue;
             }
             s.words += 1;
-            for c in token.chars().filter(|&c| is_emoji(c)) {
-                *self.emoji.entry(c.to_string()).or_default() += 1;
+            if !token.is_ascii() {
+                for emoji in crate::insights::emoji_in(token) {
+                    *self.emoji.entry(emoji.to_owned()).or_default() += 1;
+                }
             }
             let word: String = token
                 .chars()
@@ -402,10 +404,6 @@ impl StatsBuilder {
             .map(|(day, n)| (day.format("%Y-%m-%d").to_string(), *n));
         stats
     }
-}
-
-fn is_emoji(c: char) -> bool {
-    matches!(c as u32, 0x1F300..=0x1FAFF | 0x2600..=0x27BF)
 }
 
 /// Progress of a [`scan`].
@@ -871,5 +869,23 @@ mod tests {
         assert_eq!(stats.top_emoji[0], ("😀".to_owned(), 3));
         assert_eq!(stats.months.len(), 1);
         assert_eq!(stats.week.iter().flatten().sum::<u32>(), 3);
+    }
+
+    #[test]
+    fn statistics_keep_emoji_whole() {
+        let mut builder = StatsBuilder::default();
+        let mut m = message(1);
+        m.content = "🫠🩷 👍🏽 hi👩‍💻 🇩🇪 ❤️ 1️⃣".into();
+        builder.add(&m);
+        let mut emoji: Vec<String> = builder
+            .snapshot()
+            .top_emoji
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect();
+        emoji.sort();
+        let mut expected = ["🫠", "🩷", "👍🏽", "👩‍💻", "🇩🇪", "❤️"].map(str::to_owned);
+        expected.sort();
+        assert_eq!(emoji, expected);
     }
 }

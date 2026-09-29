@@ -296,6 +296,11 @@ impl EncryptedBackup {
         })
     }
 
+    /// Waits between downloads; see [`Backup::set_pace`].
+    pub(crate) fn set_pace(&mut self, pace: Arc<crate::pace::Pace>) {
+        self.downloader.set_pace(pace);
+    }
+
     pub fn settings(&self) -> &EncryptedBackupSettings {
         &self.settings
     }
@@ -385,9 +390,13 @@ impl EncryptedBackup {
         Ok(())
     }
 
-    /// Records deleted messages (and the names of their servers and DMs).
+    /// Records deleted messages, those of others whose files were saved
+    /// (and the names of their servers and DMs).
     pub fn observe(&self, event: &Event) {
-        if !matches!(event, Event::TargetStarted { .. } | Event::Deleted { .. }) {
+        if !matches!(
+            event,
+            Event::TargetStarted { .. } | Event::Deleted { .. } | Event::SavedFromOthers { .. }
+        ) {
             return;
         }
         let mut state = self.state.lock().unwrap();
