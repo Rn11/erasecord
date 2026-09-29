@@ -803,7 +803,15 @@ impl Job<'_> {
         if complete && self.options.dry_run {
             return Ok(());
         }
-        for round in 0..self.options.max_rounds.max(1) {
+        // A continued run's first round only covers what is below where it
+        // stopped. Finding nothing there says nothing about the messages
+        // above (failed ones, or ones the index returned late), so it does
+        // not count as a round.
+        let continued = self
+            .resume()
+            .is_some_and(|r| r.cursors.contains_key(&target.id));
+        let rounds = self.options.max_rounds.max(1) + u32::from(continued);
+        for round in 0..rounds {
             let first_round = round == 0 && !complete;
             let mut cursor = match (first_round, resume_cursor) {
                 (true, Some(resume)) => {
@@ -860,7 +868,8 @@ impl Job<'_> {
                 }
                 cursor = Some(next);
             }
-            if new_messages == 0 || self.options.dry_run {
+            let only_below = first_round && continued;
+            if (new_messages == 0 && !only_below) || self.options.dry_run {
                 break;
             }
         }
