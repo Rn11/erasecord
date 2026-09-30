@@ -457,6 +457,7 @@ pub async fn scan(
     let matcher = filter.compile()?;
     let base = filter.search_query(me);
     let pace = Pace::new(options.delete_delay_ms, options.search_delay_ms);
+    let targets = &crate::targets::with_threads(client, targets, &base, &pace, control).await;
     let mut builder = StatsBuilder::default();
     let mut searched = false;
 

@@ -519,6 +519,67 @@ async fn only_selected_channels_are_cleaned_up() {
 }
 
 #[tokio::test]
+async fn threads_of_selected_channels_are_cleaned_up() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let (active, archived, private) = (13, 14, 15);
+    let outside = FakeMessage::in_guild(0, 0, ME);
+    let messages: Vec<FakeMessage> = [active, archived, private]
+        .into_iter()
+        .enumerate()
+        .map(|(i, channel_id)| FakeMessage {
+            channel_id,
+            ..FakeMessage::in_guild(i as i64 + 1, 0, ME)
+        })
+        .collect();
+    let mut all = messages.clone();
+    all.push(outside.clone());
+    let fake = FakeDiscord::start(State::with_messages(all)).await;
+    let thread = |id: u64, parent: u64| {
+        serde_json::json!({
+            "id": id.to_string(),
+            "type": 11,
+            "parent_id": parent.to_string(),
+            "thread_metadata": {"archive_timestamp": "2025-01-01T00:00:00+00:00"}
+        })
+    };
+    let lists = [
+        (
+            format!("/api/v9/guilds/{GUILD}/threads/active"),
+            // A thread of another channel is left alone.
+            vec![thread(active, GUILD_CHANNEL_2), thread(16, GUILD_CHANNEL)],
+        ),
+        (
+            format!("/api/v9/channels/{GUILD_CHANNEL_2}/threads/archived/public"),
+            vec![thread(archived, GUILD_CHANNEL_2)],
+        ),
+        (
+            format!("/api/v9/channels/{GUILD_CHANNEL_2}/users/@me/threads/archived/private"),
+            vec![thread(private, GUILD_CHANNEL_2)],
+        ),
+    ];
+    for (route, threads) in lists {
+        Mock::given(method("GET"))
+            .and(path(route))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"threads": threads, "has_more": false})),
+            )
+            .mount(&fake.server)
+            .await;
+    }
+    let target = Target {
+        channels: vec![Snowflake(GUILD_CHANNEL_2)],
+        ..guild_target()
+    };
+
+    let (summary, _) = run_job(&fake, &[target], Filter::default(), fast()).await;
+
+    assert_eq!(summary.stats.deleted, 3);
+    assert_eq!(fake.remaining(), vec![outside.id]);
+}
+
+#[tokio::test]
 async fn overwrites_before_deleting() {
     let messages = vec![FakeMessage::in_dm(0, 0), FakeMessage::in_dm(1, 0)];
     let ids: Vec<u64> = messages.iter().map(|m| m.id).collect();

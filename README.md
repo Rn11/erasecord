@@ -254,7 +254,9 @@ Limitations:
 - System messages (joins, calls, pins) and messages in locked, archived threads cannot be deleted and are
   skipped.
 - Without a data package, EraseCord can only delete what Discord's search finds.
-- When single channels are picked, threads in them are not included (they are channels of their own).
+- When single channels are picked, their threads and forum posts are included too: the active ones and the
+  archived ones you can see, up to 100 channels per server (newest threads first). Threads of a data package are
+  not added this way.
 
 ## Building from source
 

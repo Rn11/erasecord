@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Threads of picked channels:** when single channels of a server are picked, their threads and forum posts
+  (active and archived) are cleaned up as well. Threads created after or archived before the time range are left
+  out.
+
 ## 0.5.0
 
 - **Save what the others sent:** a backup can also include the images and files the others sent in the chosen

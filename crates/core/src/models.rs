@@ -64,6 +64,32 @@ pub struct Channel {
     pub position: Option<i64>,
 }
 
+/// A thread or forum post: a channel of its own inside a server channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thread {
+    pub id: Snowflake,
+    /// The channel the thread belongs to.
+    #[serde(default)]
+    pub parent_id: Option<Snowflake>,
+    #[serde(default)]
+    pub thread_metadata: Option<ThreadMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadMetadata {
+    /// When the thread was last archived or unarchived (ISO 8601).
+    #[serde(default)]
+    pub archive_timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadList {
+    #[serde(default)]
+    pub threads: Vec<Thread>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
 /// An entry of the friend list (or a block, or a pending request).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Relationship {
