@@ -400,9 +400,6 @@ export function installMockBackend() {
           job.cancelled = true;
           await sleep(100);
           return null;
-        case "export_found":
-          await sleep(300);
-          return 57;
         case "plugin:dialog|save":
           return "/home/demo/Documents/erasecord-export.csv";
         case "export_run":

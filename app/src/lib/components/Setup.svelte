@@ -583,6 +583,28 @@
 
     <fieldset>
       <legend>{t("setup.saving")}</legend>
+      <p class="small muted">{t("setup.savingHint")}</p>
+      <label class="choice">
+        <input type="checkbox" checked={exportTo !== null} onchange={chooseExportFolder} />
+        <span>{t("setup.export")}</span>
+      </label>
+      {#if exportTo !== null}
+        <div class="indent field">
+          <span class="folder">
+            <code title={exportTo.dir}>{exportTo.dir}</code>
+            <button type="button" class="link small" onclick={() => chooseExportFolder()}>{t("setup.backupChange")}</button>
+          </span>
+          <label class="format small">
+            <span>{t("setup.exportFormat")}</span>
+            <select bind:value={exportTo.format}>
+              <option value="csv">{t("setup.formatCsv")}</option>
+              <option value="json">JSON</option>
+              <option value="json_lines">JSON Lines</option>
+            </select>
+          </label>
+          <span class="small muted">{t("setup.exportHint")}</span>
+        </div>
+      {/if}
       <label class="choice">
         <input type="checkbox" checked={options.backup_dir !== null} onchange={chooseBackupFolder} />
         <span>{t("setup.backup")}</span>
@@ -603,27 +625,6 @@
               {selectedDms > 0 ? t("setup.backupOthersHint") : t("setup.backupOthersNoDms")}
             </span>
           {/if}
-        </div>
-      {/if}
-      <label class="choice">
-        <input type="checkbox" checked={exportTo !== null} onchange={chooseExportFolder} />
-        <span>{t("setup.export")}</span>
-      </label>
-      {#if exportTo !== null}
-        <div class="indent field">
-          <span class="folder">
-            <code title={exportTo.dir}>{exportTo.dir}</code>
-            <button type="button" class="link small" onclick={() => chooseExportFolder()}>{t("setup.backupChange")}</button>
-          </span>
-          <label class="format small">
-            <span>{t("setup.exportFormat")}</span>
-            <select bind:value={exportTo.format}>
-              <option value="csv">{t("setup.formatCsv")}</option>
-              <option value="json">JSON</option>
-              <option value="json_lines">JSON Lines</option>
-            </select>
-          </label>
-          <span class="small muted">{t("setup.exportHint")}</span>
         </div>
       {/if}
       {#if saves}

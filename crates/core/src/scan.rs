@@ -8,7 +8,7 @@
 //!
 //! The cache lives in memory only: nothing of it is ever written to disk. It
 //! is emptied when the user logs out and when the app closes, and entries
-//! expire after [`CACHE_TTL`].
+//! expire when they have not been used for [`CACHE_TTL`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -28,8 +28,10 @@ use crate::snowflake::Snowflake;
 use crate::stopwords::is_stop_word;
 use crate::targets::Target;
 
-/// How long found messages are kept.
-pub const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+/// How long found messages are kept after they were last read or added to.
+/// Counting a large account can itself take longer than half an hour, so the
+/// time starts over whenever the entry is used.
+pub const CACHE_TTL: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// A time bound that moved by less than this (e.g. "older than 30 days",
 /// an hour later) still matches the cached search; the check for new
@@ -73,6 +75,7 @@ struct CacheEntry {
     complete: bool,
     /// Discord's count from the first search.
     total: u64,
+    /// Last read or added to.
     at: Instant,
 }
 
@@ -139,11 +142,12 @@ impl MessageCache {
 
     /// The messages known for `target` and this search, if any.
     pub fn lookup(&self, target: &Target, query: &SearchQuery) -> Option<Known> {
-        let entries = self.entries.lock().unwrap();
-        let entry = entries.get(&target.id)?;
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries.get_mut(&target.id)?;
         if !entry.matches(&CacheKey::of(target.scope(), query), query) {
             return None;
         }
+        entry.at = Instant::now();
         let inside = |id: Snowflake| {
             query.min_id.is_none_or(|min| id > min) && query.max_id.is_none_or(|max| id < max)
         };
@@ -201,6 +205,7 @@ impl MessageCache {
             );
         }
         let entry = entries.get_mut(&target.id).expect("entry just made");
+        entry.at = Instant::now();
         entry.merge(hits);
         if !entry.complete && entry.cursor == from {
             entry.cursor = next;
@@ -594,34 +599,6 @@ pub async fn scan(
         }
     }
     Ok(())
-}
-
-/// The messages found for `targets` that `filter` would delete: what an
-/// export before deleting saves.
-pub fn found_messages(
-    cache: &MessageCache,
-    me: Snowflake,
-    targets: &[Target],
-    filter: &Filter,
-) -> Result<Vec<(Target, Vec<Message>)>> {
-    let matcher = filter.compile()?;
-    let base = filter.search_query(me);
-    Ok(targets
-        .iter()
-        .filter_map(|target| {
-            let query = SearchQuery {
-                channel_ids: target.channels.clone(),
-                ..base.clone()
-            };
-            let known = cache.lookup(target, &query)?;
-            let messages: Vec<Message> = known
-                .messages
-                .into_iter()
-                .filter(|m| wanted(m, me, filter, &matcher) && !(filter.skip_pinned && m.pinned))
-                .collect();
-            Some((target.clone(), messages))
-        })
-        .collect())
 }
 
 /// Statistics about the messages of a data package that match `filter`,

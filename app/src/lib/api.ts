@@ -42,8 +42,6 @@ export const api = {
   startScan: (targets: Target[], filter: Filter, options: JobOptions, scanId: number) =>
     invoke<void>("start_scan", { targets, filter, options, scanId }),
   stopScan: () => invoke<void>("stop_scan"),
-  exportFound: (targets: Target[], filter: Filter, path: string, passphrase: PassphraseInput | null) =>
-    invoke<number>("export_found", { targets, filter, path, passphrase }),
   startJob: (
     targets: Target[],
     filter: Filter,

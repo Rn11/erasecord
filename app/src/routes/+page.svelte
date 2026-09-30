@@ -471,11 +471,6 @@
     screen = "setup";
   }
 
-  async function exportFound(path: string, pass: PassphraseInput | null) {
-    if (!scan) return 0;
-    return api.exportFound($state.snapshot(scan.targets), $state.snapshot(filter), path, pass);
-  }
-
   /**
    * Starts the clean-up of what was counted. `pass` is the passphrase for
    * the backup and export; by default the one set up.
@@ -703,11 +698,9 @@
           {filter}
           {options}
           saving={{ backup: options.backup_dir !== null, export: exportTo !== null }}
-          passphrase={setupPassphrase}
           onBack={backToSetup}
           onStop={() => api.stopScan()}
           onStart={start}
-          onExport={exportFound}
         />
       {/if}
     {:else if screen === "progress" && run}

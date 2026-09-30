@@ -2,10 +2,9 @@
   import { checksLocally, describePlaces, filterLines, formatDuration, targetLabel } from "$lib/format";
   import { num, t } from "$lib/i18n.svelte";
   import { allCounted, allRead, countOf, deleteTimeMs, readProgress, totalOf, type ScanState } from "$lib/scan";
-  import type { Filter, JobOptions, PassphraseInput } from "$lib/types";
+  import type { Filter, JobOptions } from "$lib/types";
   import Avatar from "./Avatar.svelte";
   import ConfirmDelete from "./ConfirmDelete.svelte";
-  import ExportPanel from "./ExportPanel.svelte";
   import ScanStatsView from "./ScanStatsView.svelte";
   import StatusLine from "./StatusLine.svelte";
 
@@ -14,27 +13,21 @@
     filter,
     options,
     saving,
-    passphrase,
     onBack,
     onStop,
     onStart,
-    onExport,
   }: {
     scan: ScanState;
     filter: Filter;
     options: JobOptions;
-    /** What is saved before deleting, as set up. */
+    /** What is saved before deleting, as set up (the only place to set it). */
     saving: { backup: boolean; export: boolean };
-    /** The passphrase set up for this clean-up, if any. */
-    passphrase: PassphraseInput | null;
     onBack: () => void;
     onStop: () => void;
     onStart: (dryRun: boolean) => void;
-    onExport: (path: string, passphrase: PassphraseInput | null) => Promise<number>;
   } = $props();
 
   let confirm: ConfirmDelete | undefined = $state();
-  let exporting = $state(false);
 
   const names = $derived(new Map(scan.targets.map((t) => [t.id, t.name])));
   const placeName = (id: string) => names.get(id) ?? "";
@@ -139,32 +132,23 @@
     <ScanStatsView stats={scan.stats} partial={!read} deleteMs={counted ? deleteMs : null} />
   {/if}
 
-  {#if exporting}
-    <ExportPanel
-      name="erasecord-found-{new Date().toISOString().slice(0, 10)}"
-      knownPassphrase={passphrase}
-      write={onExport}
-      onClose={() => (exporting = false)}
-    />
-  {/if}
-
-  {#if counted && total > 0 && (saving.backup || saving.export)}
+  {#if counted && total > 0}
     <p class="small muted">
-      {saving.backup && saving.export ? t("preview.savingBoth") : saving.backup ? t("preview.savingBackup") : t("preview.savingExport")}
+      {#if saving.backup || saving.export}
+        {saving.backup && saving.export ? t("preview.savingBoth") : saving.backup ? t("preview.savingBackup") : t("preview.savingExport")}
+        {t("preview.dryRunSaves")}
+      {:else}
+        {t("preview.savingNone")}
+      {/if}
+      <button class="link small" onclick={onBack}>
+        {saving.backup || saving.export ? t("preview.savingChange") : t("preview.savingSetUp")}
+      </button>
     </p>
   {/if}
 
   <footer>
     <button class="btn" onclick={onBack}>{t("common.back")}</button>
     <span class="spacer"></span>
-    {#if !scan.exact}
-      <button
-        class="btn"
-        onclick={() => (exporting = true)}
-        disabled={exporting || (scan.stats?.messages ?? 0) === 0}
-        title={t("preview.exportHint")}>{t("preview.export")}</button
-      >
-    {/if}
     <button class="btn" onclick={() => onStart(true)} disabled={!counted || total === 0}>{t("preview.dryRun")}</button>
     <button class="btn danger" onclick={() => confirm?.open()} disabled={!counted || total === 0}>
       {total === 0 && counted ? t("preview.nothing") : t(upTo ? "preview.deleteUpTo" : "preview.delete", { count: total })}
@@ -291,6 +275,15 @@
 
   p {
     margin: 0;
+  }
+
+  .link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
   }
 
   footer {
