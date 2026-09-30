@@ -37,8 +37,8 @@ computer. Open source, for Windows, macOS and Linux, as a desktop app and as a c
   a word cloud, emoji, the people you mention most, links, attachments and a search. Filter everything by time
   and place, and hand what you find straight to *Clean up*. Nothing is sent to Discord.
 - **Keep a record:** export the messages with their text, date and attachment links as CSV, JSON or JSON Lines,
-  encrypted if you like: right after counting (before anything is deleted), automatically while deleting, or
-  afterwards.
+  encrypted if you like, and download the attachments themselves: while deleting, or in a dry run that deletes
+  nothing.
 - **In your language:** English, German, Spanish, Swedish and Ukrainian. The app follows your system language,
   and you can pick another one at any time.
 - **Gentle with Discord:** strictly one request at a time, 2.5 s between deletions and 3 s between searches (each
@@ -94,20 +94,22 @@ Your token gives full access to your account: never share it. Changing your Disc
 2. Tick the servers and DMs to clean up and choose the time range. **Channels** next to a server lets you pick
    single channels; in the DM tab, **Find friends without an open DM** reaches closed conversations. Under
    *Content* you can narrow it down to words, links, attachments and so on.
-   Under *Save before deleting*, **Back up attachments before deleting** saves images, files and the list of
-   messages into one encrypted archive in a folder of your choice first (a dry run with this option only backs
-   up), and **Export the messages to a file** writes every deleted message into a new file while deleting.
+   Under *Save and export*, **Save the messages as a list** writes every deleted message (text, date and
+   attachment links) into a new CSV or JSON file while deleting, and **Download the attachments** saves images,
+   files and the list of messages into one encrypted archive in a folder of your choice first. A dry run with
+   either option only saves and deletes nothing; this is the one place to set up exports.
    Both are encrypted with one passphrase: twelve generated words that you confirm by typing three of them,
    your own, or a file. Keep it: without it the backup cannot be opened. **Open a backup…** decrypts and unpacks
    it again. With **Also save what the others sent**, the backup also gets the images and files the others sent
    in the chosen time range, in the selected DMs and group chats only (never on servers); their messages are
    not touched.
 3. Click **Count messages**. EraseCord counts first, then reads the messages and shows statistics about them
-   as it goes; **Stop reading** keeps what was read. **Export these messages…** saves them to a file before
-   anything is deleted.
+   as it goes; **Stop reading** keeps what was read. A line below says what will be saved, with a link back to
+   the settings.
 4. Click **Delete** (or first **List them first (dry run)**, and then **Delete these messages now**) and watch
-   the progress; the status line says what is happening. You can pause or stop at any point. **Export deleted
-   messages…** saves every message of the run as CSV (opens in any spreadsheet program) or JSON.
+   the progress; the status line says what is happening. You can pause or stop at any point. If nothing was
+   exported while running, **Export deleted messages…** still saves every message of the run as CSV (opens in
+   any spreadsheet program) or JSON.
 
 If a clean-up is stopped or the app is closed in the middle, the setup screen offers to **Continue** it later,
 with exactly the servers, DMs and conditions it had (and asks for the backup's passphrase, if it has one). The settings you used last are filled in automatically;
@@ -215,7 +217,7 @@ again before it is deleted: author, time range, channel, words, regular expressi
 match, so a fuzzy search result is never deleted by mistake (it shows up as *skipped: excluded by filter*).
 
 Messages are only searched for once. Counting reads them page by page and keeps them in memory (never on disk;
-forgotten after 30 minutes, on logout and when the app closes). A dry run or clean-up afterwards takes them from
+forgotten when unused for 3 hours, on logout and when the app closes). A dry run or clean-up afterwards takes them from
 there and only checks once whether anything new turned up. The lists of servers, DMs and channels are kept in
 memory for 15 minutes as well; the refresh button asks Discord again.
 

@@ -23,7 +23,6 @@ pub fn run() {
             commands::open_dm,
             commands::start_scan,
             commands::stop_scan,
-            commands::export_found,
             commands::start_job,
             commands::start_package_job,
             commands::export_run,

@@ -101,14 +101,18 @@
       </div>
       <div class="actions">
         {#if finished}
-          <button
-            class="btn"
-            onclick={() => (choosing = true)}
-            disabled={choosing || run.totals.deleted === 0}
-            title={t("progress.saveHint")}
-          >
-            {run.dryRun ? t("progress.exportFound") : t("progress.exportDeleted")}
-          </button>
+          <!-- Only when nothing was exported while running: afterwards the
+               deleted messages cannot be found again. -->
+          {#if !run.exportPath}
+            <button
+              class="btn"
+              onclick={() => (choosing = true)}
+              disabled={choosing || run.totals.deleted === 0}
+              title={t("progress.saveHint")}
+            >
+              {run.dryRun ? t("progress.exportFound") : t("progress.exportDeleted")}
+            </button>
+          {/if}
           <button class="btn" class:primary={!run.dryRun} onclick={onDone}>{t("progress.backToSettings")}</button>
           {#if run.dryRun && !run.summary?.error && wouldDelete > 0}
             <button class="btn danger" onclick={() => confirm?.open()}>

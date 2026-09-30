@@ -291,56 +291,6 @@ pub async fn stop_scan(state: State<'_, AppState>) -> CommandResult<()> {
     Ok(())
 }
 
-/// Saves the messages found while counting to `path` (CSV, JSON or JSON
-/// Lines by its name, encrypted as `.age` with a passphrase), before
-/// anything is deleted. Returns how many were saved.
-#[tauri::command]
-pub async fn export_found(
-    state: State<'_, AppState>,
-    targets: Vec<Target>,
-    filter: Filter,
-    path: PathBuf,
-    passphrase: Option<PassphraseInput>,
-) -> CommandResult<u64> {
-    let session = state.session()?;
-    let found = scan::found_messages(&state.messages, session.me.id, &targets, &filter)?;
-    let passphrase = passphrase.map(PassphraseInput::resolve).transpose()?;
-    tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
-        let format = ExportFormat::for_path(&plain_path(&path));
-        let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
-        fn write_all<W: std::io::Write>(
-            writer: &mut ExportWriter<W>,
-            found: &[(Target, Vec<erasecord_core::Message>)],
-        ) -> std::io::Result<()> {
-            for (target, messages) in found {
-                for message in messages {
-                    writer.found(target, message)?;
-                }
-            }
-            Ok(())
-        }
-        match passphrase {
-            None => {
-                let mut writer = ExportWriter::new(file, format)?;
-                write_all(&mut writer, &found)?;
-                let rows = writer.rows();
-                writer.finish()?;
-                Ok(rows)
-            }
-            Some(passphrase) => {
-                let mut writer = ExportWriter::new(vault::encrypt(&passphrase, file)?, format)?;
-                write_all(&mut writer, &found)?;
-                let rows = writer.rows();
-                writer.finish()?.finish()?;
-                Ok(rows)
-            }
-        }
-    })
-    .await
-    .map_err(|err| CommandError::other(err.to_string()))?
-    .map_err(|err| CommandError::other(format!("could not save the file: {err}")))
-}
-
 /// `list.csv.age` is a CSV file, encrypted.
 fn plain_path(path: &std::path::Path) -> PathBuf {
     if path.extension().is_some_and(|e| e == "age") {
@@ -815,13 +765,7 @@ pub async fn export_run(
     let events = state.last_run();
     let passphrase = passphrase.map(PassphraseInput::resolve).transpose()?;
     tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u64> {
-        // `list.csv.age` is a CSV file, encrypted.
-        let plain = if path.extension().is_some_and(|e| e == "age") {
-            path.with_extension("")
-        } else {
-            path.clone()
-        };
-        let format = ExportFormat::for_path(&plain);
+        let format = ExportFormat::for_path(&plain_path(&path));
         let file = std::io::BufWriter::new(std::fs::File::create(&path)?);
         let rows = match passphrase {
             None => {
