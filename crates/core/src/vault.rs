@@ -642,11 +642,17 @@ pub fn open(path: &Path, passphrase: &SecretString, into: &Path) -> Result<Opene
     Ok(opened)
 }
 
-/// Unpacks into `into`, refusing paths that would leave it.
+/// Unpacks into `into`, refusing paths that would leave it. Only files and
+/// folders are unpacked: EraseCord never writes links, and a link in an
+/// archive from elsewhere could point at any file on the computer.
 fn unpack<R: Read>(archive: &mut tar::Archive<R>, into: &Path) -> Result<u64, String> {
     let mut count = 0;
     for entry in archive.entries().map_err(|err| err.to_string())? {
         let mut entry = entry.map_err(|err| err.to_string())?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            continue;
+        }
         if entry.unpack_in(into).map_err(|err| err.to_string())? {
             count += 1;
         }
@@ -683,6 +689,39 @@ mod tests {
         assert_eq!(text, "hello");
         let wrong = decrypt(&secret("wrong"), data.as_slice()).err().unwrap();
         assert!(wrong.contains("wrong passphrase"), "{wrong}");
+    }
+
+    #[test]
+    fn links_in_an_archive_are_not_unpacked() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_file = dir.path().join("secret.txt");
+        std::fs::write(&secret_file, "private").unwrap();
+        let mut tar = tar::Builder::new(Vec::new());
+        for (kind, name) in [
+            (tar::EntryType::Symlink, "messages.json"),
+            (tar::EntryType::Link, "attachments/1/2_1_cat.png"),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(0);
+            tar.append_link(&mut header, name, &secret_file).unwrap();
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o644);
+        tar.append_data(&mut header, "attachments/1/3_1_ok.txt", &b"ok"[..])
+            .unwrap();
+        let archive = dir.path().join("backup.tar.age");
+        let mut writer = encrypt(&secret("pass"), File::create(&archive).unwrap()).unwrap();
+        writer.write_all(&tar.into_inner().unwrap()).unwrap();
+        writer.finish().unwrap();
+
+        let into = dir.path().join("opened");
+        let opened = open(&archive, &secret("pass"), &into).unwrap();
+        assert_eq!(opened.files, 1);
+        assert!(into.join("attachments/1/3_1_ok.txt").is_file());
+        assert!(std::fs::symlink_metadata(into.join("messages.json")).is_err());
+        assert!(!into.join("attachments/1/2_1_cat.png").exists());
     }
 
     #[test]

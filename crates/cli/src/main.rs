@@ -593,7 +593,12 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     println!();
                     println!("Friends without an open DM (use --dm-with <USER_ID>):");
                     for friend in friends {
-                        println!("{:<9} {:<20} {}", "friend", friend.user_id, friend.name);
+                        println!(
+                            "{:<9} {:<20} {}",
+                            "friend",
+                            friend.user_id,
+                            safe(&friend.name)
+                        );
                     }
                 }
             }
@@ -609,8 +614,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             } else {
                 println!("{:<20} {:<24} NAME", "ID", "CATEGORY");
                 for channel in channels {
-                    let category = channel.category.as_deref().unwrap_or("-");
-                    println!("{:<20} {category:<24} #{}", channel.id, channel.name);
+                    let category = safe(channel.category.as_deref().unwrap_or("-"));
+                    println!("{:<20} {category:<24} #{}", channel.id, safe(&channel.name));
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -1014,12 +1019,29 @@ async fn preview(
 fn print_preview_entry(entry: &PreviewEntry) {
     let name = target_label(&entry.target);
     match (entry.count, &entry.error) {
-        (Some(count), _) => println!("{count:>8}  {name}"),
+        (Some(count), _) => println!("{count:>8}  {}", safe(&name)),
         (None, error) => println!(
-            "{:>8}  {name} (could not search: {})",
+            "{:>8}  {} (could not search: {})",
             "?",
-            error.as_deref().unwrap_or("unknown error")
+            safe(&name),
+            safe(error.as_deref().unwrap_or("unknown error"))
         ),
+    }
+}
+
+/// Text from Discord made safe to print: control characters (such as the
+/// escape sequences a message can carry, which could rewrite the screen, set
+/// the window title or fill the clipboard) and characters that reverse or
+/// hide text are shown as `�`.
+fn safe(text: &str) -> std::borrow::Cow<'_, str> {
+    let unsafe_char = |c: char| c.is_control() || erasecord_core::backup::is_invisible(c);
+    if text.contains(unsafe_char) {
+        text.chars()
+            .map(|c| if unsafe_char(c) { '\u{FFFD}' } else { c })
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
     }
 }
 
@@ -1104,13 +1126,18 @@ fn print_package_targets(targets: &[PackageTarget]) {
         };
         println!(
             "{kind:<9} {:<20} {:>9}  {}",
-            item.target.id, item.messages, item.target.name
+            item.target.id,
+            item.messages,
+            safe(&item.target.name)
         );
         if item.target.kind == TargetKind::Guild && item.channels.len() > 1 {
             for channel in &item.channels {
                 println!(
                     "{:<9} {:<20} {:>9}  #{}",
-                    "  channel", channel.id, channel.messages, channel.name
+                    "  channel",
+                    channel.id,
+                    channel.messages,
+                    safe(&channel.name)
                 );
             }
         }
@@ -1393,7 +1420,7 @@ impl Progress {
 
     fn line(&self, text: String) {
         self.clear_status();
-        eprintln!("{text}");
+        eprintln!("{}", safe(&text));
     }
 
     fn status(&self) {
@@ -1449,7 +1476,7 @@ fn print_targets(targets: &[Target]) {
             TargetKind::Dm => "dm",
             TargetKind::GroupDm => "group-dm",
         };
-        println!("{kind:<9} {:<20} {}", target.id, target.name);
+        println!("{kind:<9} {:<20} {}", target.id, safe(&target.name));
     }
 }
 
@@ -1586,7 +1613,7 @@ fn print_places(
     places: &[erasecord_core::insights::Place],
 ) {
     for row in r.places.iter().take(30) {
-        println!("  {:>8}  {}", row.messages, places[row.place].name);
+        println!("  {:>8}  {}", row.messages, safe(&places[row.place].name));
     }
     if r.places.len() > 30 {
         println!("  … and {} more", r.places.len() - 30);
@@ -1596,7 +1623,9 @@ fn print_places(
         for c in r.channels.iter().take(20) {
             println!(
                 "  {:>8}  #{} in {}",
-                c.messages, c.name, places[c.place].name
+                c.messages,
+                safe(&c.name),
+                safe(&places[c.place].name)
             );
         }
     }
@@ -1605,7 +1634,7 @@ fn print_places(
 fn print_words(r: &erasecord_core::insights::WordsReport) {
     println!("{} words, {} different", r.total_words, r.distinct_words);
     for w in r.words.iter().take(30) {
-        println!("  {:>8}  {}", w.count, w.key);
+        println!("  {:>8}  {}", w.count, safe(&w.key));
     }
     if !r.emoji.is_empty() {
         let emoji: Vec<String> = r
@@ -1613,8 +1642,8 @@ fn print_words(r: &erasecord_core::insights::WordsReport) {
             .iter()
             .take(15)
             .map(|e| match e.id {
-                Some(_) => format!(":{}: {}", e.emoji, e.count),
-                None => format!("{} {}", e.emoji, e.count),
+                Some(_) => format!(":{}: {}", safe(&e.emoji), e.count),
+                None => format!("{} {}", safe(&e.emoji), e.count),
             })
             .collect();
         println!("\nEmoji  {}", emoji.join("  "));
@@ -1624,7 +1653,7 @@ fn print_words(r: &erasecord_core::insights::WordsReport) {
 fn print_links(r: &erasecord_core::insights::LinksReport) {
     println!("{} links in {} messages", r.links, r.messages_with_links);
     for d in r.domains.iter().take(20) {
-        println!("  {:>8}  {}", d.count, d.key);
+        println!("  {:>8}  {}", d.count, safe(&d.key));
     }
     println!("\n{} attachments", r.attachments);
     for k in r.kinds.iter().filter(|k| k.count > 0) {
@@ -1635,6 +1664,20 @@ fn print_links(r: &erasecord_core::insights::LinksReport) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_from_discord_cannot_control_the_terminal() {
+        // Clears the screen, sets the window title, writes to the clipboard,
+        // and turns "exe.jpg" around.
+        let hostile = "\x1b[2J\x1b]0;hi\x07\x1b]52;c;cm0gLXJm\x07\u{9b}31m ok \u{202e}gpj.exe";
+        let shown = safe(hostile);
+        assert!(
+            !shown.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{shown:?}"
+        );
+        assert!(shown.contains(" ok "));
+        assert_eq!(safe("plain name"), "plain name");
+    }
 
     #[test]
     fn parses_ages() {

