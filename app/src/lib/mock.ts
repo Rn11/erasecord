@@ -405,6 +405,8 @@ export function installMockBackend() {
         case "export_run":
           await sleep(200);
           return 42;
+        case "save_png":
+          return null;
         case "plugin:dialog|open":
           return args.options?.directory ? "/home/demo/EraseCord backup" : "/home/demo/Downloads/package.zip";
         case "import_package":

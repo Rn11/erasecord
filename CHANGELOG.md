@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Your year as a picture:** with one year picked in Insights, *Save … as a picture* saves a card of that year
+  (messages, words, streak, busiest day, top servers and emoji; no DMs) as a PNG to share.
 - **Clean up automatically:** the command line tool takes the token the app remembered from the system's
   credential store, so it can run on a schedule (Task Scheduler, cron, systemd) without the token in a file. See
   *Cleaning up automatically* in the README.

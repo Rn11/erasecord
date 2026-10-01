@@ -291,6 +291,12 @@ export const sv: Dictionary = {
   "insights.byHour": "Per timme på dygnet",
   "insights.peakHour": "Mest aktiv runt {hour}",
   "insights.share": "Andel",
+  "insights.yearCardSave": "Spara {year} som bild",
+  "insights.yearCardHint": "En bild av ditt år att dela: siffror, mest aktiva servrar och favoritemoji, utan DM.",
+  "insights.yearCardSaved": "Sparad i {path}",
+  "insights.yearCardTitle": "Mitt {year} på Discord",
+  "insights.yearCardServers": "Mest aktiv i",
+  "insights.yearCardEmoji": "Favoritemoji",
 
   "insights.places": "Servrar & DM",
   "insights.words": "Ord",

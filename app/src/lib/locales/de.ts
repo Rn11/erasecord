@@ -292,6 +292,12 @@ export const de: Dictionary = {
   "insights.byHour": "Nach Tageszeit",
   "insights.peakHour": "Am aktivsten gegen {hour}",
   "insights.share": "Anteil",
+  "insights.yearCardSave": "{year} als Bild speichern",
+  "insights.yearCardHint": "Ein Bild deines Jahres zum Teilen: Zahlen, aktivste Server und Lieblings-Emoji, ohne DMs.",
+  "insights.yearCardSaved": "Gespeichert unter {path}",
+  "insights.yearCardTitle": "Mein {year} auf Discord",
+  "insights.yearCardServers": "Am aktivsten in",
+  "insights.yearCardEmoji": "Lieblings-Emoji",
 
   "insights.places": "Server & DMs",
   "insights.words": "Wörter",

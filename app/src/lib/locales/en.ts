@@ -292,6 +292,12 @@ export const en = {
   "insights.byHour": "By hour of the day",
   "insights.peakHour": "Busiest around {hour}",
   "insights.share": "Share",
+  "insights.yearCardSave": "Save {year} as a picture",
+  "insights.yearCardHint": "A picture of your year to share: numbers, busiest servers and favourite emoji, without DMs.",
+  "insights.yearCardSaved": "Saved to {path}",
+  "insights.yearCardTitle": "My {year} on Discord",
+  "insights.yearCardServers": "Most active in",
+  "insights.yearCardEmoji": "Favourite emoji",
 
   "insights.places": "Servers & DMs",
   "insights.words": "Words",

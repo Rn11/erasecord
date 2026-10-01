@@ -26,6 +26,7 @@ pub fn run() {
             commands::start_job,
             commands::start_package_job,
             commands::export_run,
+            commands::save_png,
             commands::unfinished_run,
             commands::resume_run,
             commands::discard_run,

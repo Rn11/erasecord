@@ -3,7 +3,10 @@
   import { num, t } from "$lib/i18n.svelte";
   import { compact, formatDate } from "$lib/insights/chart";
   import { useQuery } from "$lib/insights/query.svelte";
-  import { placeName } from "$lib/insights/store.svelte";
+  import { save } from "@tauri-apps/plugin-dialog";
+  import { errorMessage } from "$lib/errors";
+  import { ask, insights, placeName } from "$lib/insights/store.svelte";
+  import { drawYearCard, pngBytes } from "$lib/insights/yearCard";
   import { hideTip, showTip } from "$lib/insights/tooltip.svelte";
   import type { MessageRef, Scope, Span } from "$lib/insights/types";
   import type { PackageSummary } from "$lib/types";
@@ -14,6 +17,64 @@
   const o = $derived(q.data);
   const maxYear = $derived(Math.max(1, ...(o?.years ?? []).map((y) => y.messages)));
   const span = (s: Span) => t("insights.spanDates", { from: formatDate(s.from), to: formatDate(s.to) });
+
+  /** The year when the period is exactly one calendar year. */
+  const year = $derived.by(() => {
+    const y = scope.from?.slice(0, 4);
+    return y && scope.from === `${y}-01-01` && scope.to === `${y}-12-31` ? Number(y) : null;
+  });
+  let cardBusy = $state(false);
+  let cardResult = $state<{ path?: string; error?: string } | null>(null);
+
+  async function saveYearCard() {
+    if (!o || year === null) return;
+    cardResult = null;
+    try {
+      const path = await save({
+        title: t("insights.yearCardSave", { year }),
+        defaultPath: `erasecord-${year}.png`,
+        filters: [{ name: "PNG", extensions: ["png"] }],
+      });
+      if (!path) return;
+      cardBusy = true;
+      const [places, words] = await Promise.all([
+        ask("places", scope, api.insightsPlaces),
+        ask("words", scope, api.insightsWords),
+      ]);
+      // Servers only: DM names are other people's.
+      const servers = places.places
+        .filter((p) => insights.info?.places[p.place]?.kind === "guild")
+        .slice(0, 3)
+        .map((p) => placeName(p.place, pkg));
+      const canvas = drawYearCard({
+        title: t("insights.yearCardTitle", { year }),
+        figures: [
+          [t("stats.messages"), num(o.messages)],
+          [t("stats.words"), num(o.words)],
+          [t("stats.activeDays"), num(o.active_days)],
+          ...(o.longest_streak
+            ? [[t("insights.streak"), t("insights.days", { count: o.longest_streak.days })] as [string, string]]
+            : []),
+          ...(o.busiest_day ? [[t("stats.busiestDay"), formatDate(o.busiest_day.date)] as [string, string]] : []),
+          [t("stats.attachments"), num(o.attachments)],
+        ],
+        serversLabel: t("insights.yearCardServers"),
+        servers,
+        emojiLabel: t("insights.yearCardEmoji"),
+        emoji: words.emoji
+          .filter((e) => e.id === null)
+          .slice(0, 5)
+          .map((e) => e.emoji),
+        footer: "EraseCord",
+      });
+      await api.savePng(path, await pngBytes(canvas));
+      cardResult = { path };
+    } catch (err) {
+      cardResult = { error: errorMessage(err) };
+    } finally {
+      cardBusy = false;
+    }
+  }
 </script>
 
 {#snippet message(title: string, m: MessageRef)}
@@ -42,6 +103,17 @@
   <p class="muted empty">{t("insights.nothingHere")}</p>
 {:else}
   <div class="overview" class:stale={q.loading}>
+    {#if year !== null}
+      <div class="year-card small">
+        <button class="btn small" onclick={saveYearCard} disabled={cardBusy}>
+          {#if cardBusy}<span class="spinner"></span>{/if}
+          {t("insights.yearCardSave", { year })}
+        </button>
+        <span class="muted">{t("insights.yearCardHint")}</span>
+        {#if cardResult?.path}<span>{t("insights.yearCardSaved", { path: cardResult.path })}</span>{/if}
+        {#if cardResult?.error}<span class="callout error">{cardResult.error}</span>{/if}
+      </div>
+    {/if}
     <div class="figures">
       <div class="hero">
         <span class="label">{t("stats.messages")}</span>
@@ -239,6 +311,12 @@
     font-weight: 600;
   }
 
+  .year-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+  }
   .years {
     display: grid;
     gap: 2px;

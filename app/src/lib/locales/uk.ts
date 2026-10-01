@@ -330,6 +330,12 @@ export const uk: Dictionary = {
   "insights.byHour": "За годиною доби",
   "insights.peakHour": "Найактивніше близько {hour}",
   "insights.share": "Частка",
+  "insights.yearCardSave": "Зберегти {year} як зображення",
+  "insights.yearCardHint": "Зображення вашого року, щоб поділитися: цифри, найактивніші сервери й улюблені емодзі, без особистих повідомлень.",
+  "insights.yearCardSaved": "Збережено в {path}",
+  "insights.yearCardTitle": "Мій {year} у Discord",
+  "insights.yearCardServers": "Найактивніше в",
+  "insights.yearCardEmoji": "Улюблені емодзі",
 
   "insights.places": "Сервери й особисті",
   "insights.words": "Слова",

@@ -140,7 +140,9 @@ charts, your servers and DMs, words and emoji, links and files, and a search. It
 Insights without logging in* on the login screen), and a package imported in *Clean up* is already there. The
 filters at the top (period, servers and DMs) apply to everything; clicking a year, month, day, server or word
 narrows it down. **Clean up…** next to a server or search result opens *Clean up* with it filled in, to be
-counted and checked before anything is deleted. One million messages open in about a second.
+counted and checked before anything is deleted. One million messages open in about a second. With one calendar year picked (click it under *Messages per year*),
+**Save … as a picture** draws a card of that year to share: its numbers, your three busiest servers and favourite
+emoji, without any DMs.
 
 The package stays on your computer and is only read, never uploaded. A package of another account is refused.
 Messages you deleted after requesting it are simply counted as deleted again. The package knows the people in a
