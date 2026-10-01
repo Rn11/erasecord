@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Clean up automatically:** the command line tool takes the token the app remembered from the system's
+  credential store, so it can run on a schedule (Task Scheduler, cron, systemd) without the token in a file. See
+  *Cleaning up automatically* in the README.
 - **Threads of picked channels:** when single channels of a server are picked, their threads and forum posts
   (active and archived) are cleaned up as well. Threads created after or archived before the time range are left
   out.

@@ -206,6 +206,23 @@ erasecord inspect-package package.zip             # its structure only, safe to 
 
 Run `erasecord help <command>` for all options.
 
+### Cleaning up automatically
+
+To keep deleting old messages on a schedule (say, everything older than 30 days in your DMs, once a day), let
+your system run the command line tool with `--yes`, which skips the question before deleting. It needs no token
+in a file: if *Remember on this device* was ticked in the app, the tool takes the token from the credential store.
+Run the command once by hand first; macOS then asks whether `erasecord` may read it (choose *Always Allow*).
+
+- **Windows:** `schtasks /create /tn EraseCord /sc daily /st 12:00 /tr "C:\Tools\erasecord-cli-windows-x86_64.exe delete --all-dms --before 30d --yes"`
+  (runs while you are logged in).
+- **macOS:** `crontab -e` and add `0 12 * * * /usr/local/bin/erasecord delete --all-dms --before 30d --yes`.
+- **Linux:** cron cannot reach the credential store, so use a systemd user timer, or put
+  `DISCORD_TOKEN=…` into a file only you can read and run `set -a; . ~/.erasecord-token; erasecord delete …` from
+  cron.
+
+A run that is cut short simply starts over the next time; messages already deleted are not found again. Every
+run follows the same pauses as a manual one, so a first run over years of messages can take hours.
+
 ## How it works
 
 Discord has no API for bulk-deleting your own messages, so EraseCord does what you would do by hand, only
