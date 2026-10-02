@@ -1493,6 +1493,7 @@ dependencies = [
  "chrono",
  "clap",
  "erasecord-core",
+ "keyring",
  "rpassword",
  "serde_json",
  "tokio",

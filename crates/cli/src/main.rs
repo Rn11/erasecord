@@ -24,8 +24,9 @@ use tokio::sync::mpsc;
     name = "erasecord",
     version,
     about = "Delete your own Discord messages from selected servers and DMs.",
-    after_help = "The token is read from the DISCORD_TOKEN environment variable, or asked for \
-                  (hidden) when it is not set. Automating a user account is against Discord's \
+    after_help = "The token is read from the DISCORD_TOKEN environment variable, else taken from \
+                  the system's credential store if the app remembered it, else asked for \
+                  (hidden). Automating a user account is against Discord's \
                   Terms of Service; use at your own risk."
 )]
 struct Cli {
@@ -911,12 +912,28 @@ fn read_token() -> Result<String> {
             return Ok(token);
         }
     }
+    if let Some(token) = saved_token() {
+        eprintln!("Using the token the EraseCord app remembered.");
+        return Ok(token);
+    }
     if !io::stdin().is_terminal() {
-        bail!("set DISCORD_TOKEN, or run erasecord in a terminal to type the token");
+        bail!(
+            "set DISCORD_TOKEN, let the EraseCord app remember your token, or run erasecord in a \
+             terminal to type it"
+        );
     }
     Ok(rpassword::prompt_password(
         "Discord token (input hidden): ",
     )?)
+}
+
+/// The token the app keeps in the system's credential store (Keychain,
+/// Windows Credential Manager, Secret Service) when *Remember on this device* is ticked.
+/// This lets scheduled runs work without the token in a file or variable.
+fn saved_token() -> Option<String> {
+    let entry = keyring::Entry::new("erasecord", "discord-token").ok()?;
+    let token = entry.get_password().ok()?;
+    (!token.trim().is_empty()).then_some(token)
 }
 
 /// Before deleting starts, Ctrl+C quits at once. While deleting, the first

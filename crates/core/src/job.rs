@@ -25,7 +25,7 @@ use crate::resume::Checkpoint;
 use crate::scan::MessageCache;
 use crate::search::SearchQuery;
 use crate::snowflake::Snowflake;
-use crate::targets::{Target, TargetKind};
+use crate::targets::{with_threads, Target, TargetKind};
 use crate::vault::{EncryptedBackup, EncryptedBackupSettings, KeySlot};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -348,6 +348,7 @@ pub async fn preview(
     filter.compile()?;
     let query = filter.search_query(me);
     let pace = Pace::new(options.delete_delay_ms, options.search_delay_ms);
+    let targets = &with_threads(client, targets, &query, &pace, control).await;
     let mut entries = Vec::with_capacity(targets.len());
     for (index, target) in targets.iter().enumerate() {
         if index > 0 {
@@ -511,6 +512,15 @@ async fn run_from(
         }
     };
     let pace = Arc::new(Pace::new(options.delete_delay_ms, options.search_delay_ms));
+    let expanded;
+    let targets = match source {
+        Source::Search(_) => {
+            let query = filter.search_query(me);
+            expanded = with_threads(client, targets, &query, &pace, control).await;
+            &expanded[..]
+        }
+        Source::Package(_) => targets,
+    };
     let mut vault = match options
         .backup_encryption
         .as_ref()

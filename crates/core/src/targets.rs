@@ -2,10 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use chrono::{DateTime, Utc};
+
 use crate::client::Client;
 use crate::error::{Error, Result};
-use crate::models::{channel_type, Channel, Guild, Relationship, User};
-use crate::search::Scope;
+use crate::job::JobControl;
+use crate::models::{channel_type, Channel, Guild, Relationship, Thread, User};
+use crate::pace::Pace;
+use crate::search::{Scope, SearchQuery};
 use crate::snowflake::Snowflake;
 
 const CDN: &str = "https://cdn.discordapp.com";
@@ -153,7 +157,8 @@ pub struct GuildChannel {
 /// The channels of a server that can hold messages, in the order Discord
 /// shows them: uncategorised first, then category by category.
 ///
-/// Threads and forum posts are separate channels and are not listed.
+/// Threads and forum posts are separate channels and are not listed; they
+/// are added to a clean-up of their channel by [`with_threads`].
 pub async fn list_channels(client: &Client, guild_id: Snowflake) -> Result<Vec<GuildChannel>> {
     Ok(sort_channels(client.guild_channels(guild_id).await?))
 }
@@ -193,6 +198,117 @@ fn sort_channels(channels: Vec<Channel>) -> Vec<GuildChannel> {
         .collect();
     listed.sort_by_key(|a| a.0);
     listed.into_iter().map(|(_, item)| item).collect()
+}
+
+/// Discord's search takes a limited number of channels at once, so a server
+/// is searched in at most this many (picked channels and their threads).
+const MAX_SEARCH_CHANNELS: usize = 100;
+
+/// `targets` with the threads and forum posts of their picked channels
+/// added, because Discord's search treats every thread as a channel of its
+/// own. Servers searched as a whole already include them.
+///
+/// Only threads that can hold matching messages are added: none created
+/// after the time range, none archived before it (the archived lists are
+/// read newest first, so paging stops there). The newest threads come first
+/// when there are more than [`MAX_SEARCH_CHANNELS`]. A list that cannot be
+/// read (no access, network error) is skipped; its threads stay untouched.
+pub(crate) async fn with_threads(
+    client: &Client,
+    targets: &[Target],
+    query: &SearchQuery,
+    pace: &Pace,
+    control: &JobControl,
+) -> Vec<Target> {
+    let mut first = true;
+    let mut next = || {
+        let wait = if first {
+            None
+        } else {
+            Some(pace.before_download())
+        };
+        first = false;
+        wait
+    };
+    let mut expanded = targets.to_vec();
+    for target in &mut expanded {
+        if target.kind != TargetKind::Guild || target.channels.is_empty() {
+            continue;
+        }
+        let mut threads = Vec::new();
+        if let Some(Ok(active)) = request(control, next(), client.active_threads(target.id)).await {
+            threads.extend(
+                active
+                    .into_iter()
+                    .filter(|t| t.parent_id.is_some_and(|p| target.channels.contains(&p))),
+            );
+        }
+        for &channel in target.channels.clone().iter() {
+            for private in [false, true] {
+                let mut before: Option<String> = None;
+                loop {
+                    let page = client.archived_threads(channel, private, before.as_deref());
+                    let Some(Ok(page)) = request(control, next(), page).await else {
+                        break;
+                    };
+                    let mut past_range = false;
+                    for thread in page.threads {
+                        let archived = archived_at(&thread);
+                        if archived
+                            .is_some_and(|at| query.min_id.is_some_and(|min| at < min.created_at()))
+                        {
+                            past_range = true;
+                            break;
+                        }
+                        before = thread
+                            .thread_metadata
+                            .as_ref()
+                            .and_then(|m| m.archive_timestamp.clone());
+                        threads.push(thread);
+                    }
+                    if past_range || !page.has_more || before.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+        // A thread's messages are all newer than the thread itself.
+        threads.retain(|t| query.max_id.is_none_or(|max| t.id < max));
+        threads.sort_by_key(|t| std::cmp::Reverse(t.id));
+        for thread in threads {
+            if target.channels.len() >= MAX_SEARCH_CHANNELS {
+                break;
+            }
+            if !target.channels.contains(&thread.id) {
+                target.channels.push(thread.id);
+            }
+        }
+    }
+    expanded
+}
+
+/// Runs `future` after `wait`; `None` if the job was stopped meanwhile.
+async fn request<T>(
+    control: &JobControl,
+    wait: Option<std::time::Duration>,
+    future: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    if let Some(wait) = wait {
+        control.sleep_for(wait).await.ok()?;
+    }
+    control.checkpoint().await.ok()?;
+    control.guard(future).await.ok()
+}
+
+fn archived_at(thread: &Thread) -> Option<DateTime<Utc>> {
+    let at = thread
+        .thread_metadata
+        .as_ref()?
+        .archive_timestamp
+        .as_deref()?;
+    DateTime::parse_from_rfc3339(at)
+        .ok()
+        .map(|at| at.with_timezone(&Utc))
 }
 
 /// All servers (sorted by name), then all open DMs (most recent first).

@@ -140,7 +140,9 @@ charts, your servers and DMs, words and emoji, links and files, and a search. It
 Insights without logging in* on the login screen), and a package imported in *Clean up* is already there. The
 filters at the top (period, servers and DMs) apply to everything; clicking a year, month, day, server or word
 narrows it down. **Clean up…** next to a server or search result opens *Clean up* with it filled in, to be
-counted and checked before anything is deleted. One million messages open in about a second.
+counted and checked before anything is deleted. One million messages open in about a second. With one calendar year picked (click it under *Messages per year*),
+**Save … as a picture** draws a card of that year to share: its numbers, your three busiest servers and favourite
+emoji, without any DMs.
 
 The package stays on your computer and is only read, never uploaded. A package of another account is refused.
 Messages you deleted after requesting it are simply counted as deleted again. The package knows the people in a
@@ -206,6 +208,23 @@ erasecord inspect-package package.zip             # its structure only, safe to 
 
 Run `erasecord help <command>` for all options.
 
+### Cleaning up automatically
+
+To keep deleting old messages on a schedule (say, everything older than 30 days in your DMs, once a day), let
+your system run the command line tool with `--yes`, which skips the question before deleting. It needs no token
+in a file: if *Remember on this device* was ticked in the app, the tool takes the token from the credential store.
+Run the command once by hand first; macOS then asks whether `erasecord` may read it (choose *Always Allow*).
+
+- **Windows:** `schtasks /create /tn EraseCord /sc daily /st 12:00 /tr "C:\Tools\erasecord-cli-windows-x86_64.exe delete --all-dms --before 30d --yes"`
+  (runs while you are logged in).
+- **macOS:** `crontab -e` and add `0 12 * * * /usr/local/bin/erasecord delete --all-dms --before 30d --yes`.
+- **Linux:** cron cannot reach the credential store, so use a systemd user timer, or put
+  `DISCORD_TOKEN=…` into a file only you can read and run `set -a; . ~/.erasecord-token; erasecord delete …` from
+  cron.
+
+A run that is cut short simply starts over the next time; messages already deleted are not found again. Every
+run follows the same pauses as a manual one, so a first run over years of messages can take hours.
+
 ## How it works
 
 Discord has no API for bulk-deleting your own messages, so EraseCord does what you would do by hand, only
@@ -254,7 +273,9 @@ Limitations:
 - System messages (joins, calls, pins) and messages in locked, archived threads cannot be deleted and are
   skipped.
 - Without a data package, EraseCord can only delete what Discord's search finds.
-- When single channels are picked, threads in them are not included (they are channels of their own).
+- When single channels are picked, their threads and forum posts are included too: the active ones and the
+  archived ones you can see, up to 100 channels per server (newest threads first). Threads of a data package are
+  not added this way.
 
 ## Building from source
 

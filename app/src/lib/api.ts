@@ -51,6 +51,7 @@ export const api = {
   ) => invoke<string | null>("start_job", { targets, filter, options, backupPassphrase, export: exportTo }),
   importPackage: (path: string) => invoke<PackageSummary>("import_package", { path }),
   closePackage: () => invoke<void>("close_package"),
+  savePng: (path: string, bytes: number[]) => invoke<void>("save_png", { path, bytes }),
   insightsInfo: () => invoke<Info>("insights_info"),
   insightsOverview: (scope: Scope) => invoke<Overview>("insights_overview", { scope }),
   insightsTime: (scope: Scope) => invoke<Timeline>("insights_time", { scope }),

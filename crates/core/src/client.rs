@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use crate::models::{Channel, Guild, Message, Relationship, SearchResponse, User};
+use crate::models::{
+    Channel, Guild, Message, Relationship, SearchResponse, Thread, ThreadList, User,
+};
 use crate::ratelimit::{self, RateLimiter};
 use crate::search::{Scope, SearchQuery};
 use crate::snowflake::Snowflake;
@@ -187,6 +189,35 @@ impl Client {
     /// The channels of a server that the user can see.
     pub async fn guild_channels(&self, guild_id: Snowflake) -> Result<Vec<Channel>> {
         self.get(&format!("/guilds/{guild_id}/channels"), &[]).await
+    }
+
+    /// Threads of a server that are not archived.
+    pub async fn active_threads(&self, guild_id: Snowflake) -> Result<Vec<Thread>> {
+        let list: ThreadList = self
+            .get(&format!("/guilds/{guild_id}/threads/active"), &[])
+            .await?;
+        Ok(list.threads)
+    }
+
+    /// One page of the archived threads of a channel, most recently
+    /// archived first: public ones, or the private ones the user is in.
+    /// `before` is an archive timestamp from the previous page.
+    pub async fn archived_threads(
+        &self,
+        channel_id: Snowflake,
+        private: bool,
+        before: Option<&str>,
+    ) -> Result<ThreadList> {
+        let path = if private {
+            format!("/channels/{channel_id}/users/@me/threads/archived/private")
+        } else {
+            format!("/channels/{channel_id}/threads/archived/public")
+        };
+        let mut query = vec![("limit", "100".to_owned())];
+        if let Some(before) = before {
+            query.push(("before", before.to_owned()));
+        }
+        self.get(&path, &query).await
     }
 
     pub async fn channel(&self, channel_id: Snowflake) -> Result<Channel> {

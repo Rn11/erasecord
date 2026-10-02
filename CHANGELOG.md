@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Your year as a picture:** with one year picked in Insights, *Save … as a picture* saves a card of that year
+  (messages, words, streak, busiest day, top servers and emoji; no DMs) as a PNG to share.
+- **Clean up automatically:** the command line tool takes the token the app remembered from the system's
+  credential store, so it can run on a schedule (Task Scheduler, cron, systemd) without the token in a file. See
+  *Cleaning up automatically* in the README.
+- **Threads of picked channels:** when single channels of a server are picked, their threads and forum posts
+  (active and archived) are cleaned up as well. Threads created after or archived before the time range are left
+  out.
+
 ## 0.5.0
 
 - **Save what the others sent:** a backup can also include the images and files the others sent in the chosen

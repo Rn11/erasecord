@@ -794,6 +794,25 @@ pub async fn export_run(
     .map_err(|err| CommandError::other(format!("could not save the file: {err}")))
 }
 
+/// Saves a picture drawn by the app, such as the year card of Insights.
+/// Only PNG data into a `.png` file.
+#[tauri::command]
+pub async fn save_png(path: PathBuf, bytes: Vec<u8>) -> CommandResult<()> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let is_png = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+    if !is_png || !bytes.starts_with(SIGNATURE) {
+        return Err(CommandError::other(
+            "only PNG pictures can be saved here".into(),
+        ));
+    }
+    tauri::async_runtime::spawn_blocking(move || std::fs::write(&path, bytes))
+        .await
+        .map_err(|err| CommandError::other(err.to_string()))?
+        .map_err(|err| CommandError::other(format!("could not save the file: {err}")))
+}
+
 #[derive(Serialize)]
 pub struct PackageSummary {
     targets: Vec<PackageTarget>,
