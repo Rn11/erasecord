@@ -79,11 +79,21 @@ impl Pace {
 
     /// Discord said to slow down: longer pauses from now on.
     pub fn slow_down(&self) {
-        let _ = self
-            .factor
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |factor| {
-                Some((factor + SLOWDOWN_STEP).min(MAX_SLOWDOWN * 100))
-            });
+        // A compare-and-swap loop rather than `fetch_update`, which newer
+        // Rust renamed: this builds on old and new compilers alike.
+        let mut current = self.factor.load(Ordering::Relaxed);
+        loop {
+            let next = (current + SLOWDOWN_STEP).min(MAX_SLOWDOWN * 100);
+            match self.factor.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// The current pause between deletions, in milliseconds (without the

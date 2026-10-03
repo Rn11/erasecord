@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 - **Your year as a picture:** with one year picked in Insights, *Save … as a picture* saves a card of that year
   (messages, words, streak, busiest day, top servers and emoji; no DMs) as a PNG to share.
@@ -10,6 +10,15 @@
 - **Threads of picked channels:** when single channels of a server are picked, their threads and forum posts
   (active and archived) are cleaned up as well. Threads created after or archived before the time range are left
   out.
+- **Export set up in one place:** saving the messages as a list and downloading the attachments are both set
+  up under *Save and export*; the preview says what will be saved. Found messages are kept for 3 hours since
+  they were last used (was 30 minutes since counting began), so a long count no longer expires before deleting.
+- **Continuing a stopped clean-up** tries messages that failed before again, and a server or DM whose search
+  failed keeps the clean-up resumable (its progress and encrypted backup stay) instead of ending it.
+- **Safer with hostile message text:** CSV cells can no longer start a formula in Excel, attachment file names
+  with direction overrides or zero-width characters are cleaned, opening a backup unpacks only files and
+  folders, and the command line tool shows control characters from Discord as `�`.
+- Updating: 0.3.0 and later offer this version by themselves a few seconds after starting.
 
 ## 0.5.0
 

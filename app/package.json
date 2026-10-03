@@ -1,6 +1,6 @@
 {
   "name": "erasecord-app",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Desktop app to delete your own Discord messages",
   "type": "module",
   "scripts": {
